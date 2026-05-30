@@ -1,10 +1,11 @@
-import os
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
-from loguru import logger
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 from src.invite import validate_invite
 from src.session import run_session
@@ -34,13 +35,13 @@ async def websocket_endpoint(websocket: WebSocket, invite: str = ""):
         await websocket.close(code=4001)
         return
 
-    logger.info(f"New session for invite {invite[:8]}...")
+    logger.info("New session for invite %s...", invite[:8])
     try:
         await run_session(websocket)
     except WebSocketDisconnect:
-        logger.info(f"Client disconnected (invite {invite[:8]}...)")
+        logger.info("Client disconnected (invite %s...)", invite[:8])
     except Exception as e:
-        logger.error(f"Session error: {e}")
+        logger.error("Session error: %s", e)
 
 
 if STATIC_DIR.exists():

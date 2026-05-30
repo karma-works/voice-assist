@@ -1,14 +1,12 @@
 import asyncio
-import base64
-import json
 import traceback
 from datetime import datetime
-from typing import Optional
 
 import pytz
 from google import genai
 from google.genai import types
-from loguru import logger
+import logging
+logger = logging.getLogger(__name__)
 
 from src.config import GEMINI_API_KEY, GEMINI_MODEL, BUFFER_MINUTES
 from src import calendar_service
