@@ -8,7 +8,7 @@ from google.genai import types
 import logging
 logger = logging.getLogger(__name__)
 
-from src.config import GEMINI_API_KEY, GEMINI_MODEL, BUFFER_MINUTES
+from src.config import GCP_PROJECT_ID, GCP_LOCATION, GEMINI_MODEL, BUFFER_MINUTES
 from src import calendar_service
 
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
@@ -137,7 +137,7 @@ PRIVACY: If asked about other meetings on the calendar, say: "I can only see ava
 
 
 async def run_session(websocket) -> None:
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(vertexai=True, project=GCP_PROJECT_ID, location=GCP_LOCATION)
 
     config = types.LiveConnectConfig(
         response_modalities=["AUDIO"],

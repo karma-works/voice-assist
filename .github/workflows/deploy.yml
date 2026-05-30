@@ -51,8 +51,7 @@ jobs:
             --timeout 3600 \
             --memory 512Mi \
             --cpu 1 \
-            --set-secrets "GEMINI_API_KEY=GEMINI_API_KEY:latest" \
-            --set-env-vars "GCP_PROJECT_ID=${{ env.PROJECT_ID }},GOOGLE_CALENDAR_ID=${{ secrets.GOOGLE_CALENDAR_ID }}" \
+            --set-env-vars "GCP_PROJECT_ID=${{ env.PROJECT_ID }},GCP_LOCATION=us-central1,GOOGLE_CALENDAR_ID=${{ secrets.GOOGLE_CALENDAR_ID }}" \
             --project ${{ env.PROJECT_ID }}
 
       - name: Get service URL and smoke test
