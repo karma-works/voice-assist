@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Schedule a Meeting</title>
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#1a1a2e">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .card {
+      background: #16213e;
+      border-radius: 20px;
+      padding: 40px;
+      max-width: 480px;
+      width: 100%;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+      text-align: center;
+    }
+    h1 { font-size: 1.6rem; margin-bottom: 8px; color: #fff; }
+    .subtitle { color: #888; margin-bottom: 32px; font-size: 0.95rem; }
+    #status {
+      font-size: 0.9rem;
+      padding: 10px 20px;
+      border-radius: 100px;
+      background: #0f3460;
+      display: inline-block;
+      margin-bottom: 28px;
+      min-width: 160px;
+      transition: all 0.3s;
+    }
+    #status.listening { background: #1a6b3a; }
+    #status.speaking { background: #6b3a1a; }
+    #status.error { background: #6b1a1a; }
+    #status.connecting { background: #3a3a6b; }
+    #mic-btn {
+      width: 100px;
+      height: 100px;
+      border-radius: 50%;
+      border: none;
+      cursor: pointer;
+      font-size: 2.5rem;
+      background: #0f3460;
+      color: #fff;
+      transition: all 0.2s;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 24px;
+    }
+    #mic-btn:hover { transform: scale(1.05); background: #1a4b8e; }
+    #mic-btn.active { background: #c0392b; animation: pulse 1.5s infinite; }
+    #mic-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 4px 20px rgba(192,57,43,0.4); }
+      50% { box-shadow: 0 4px 40px rgba(192,57,43,0.8); }
+    }
+    #transcript {
+      max-height: 200px;
+      overflow-y: auto;
+      text-align: left;
+      margin-top: 24px;
+      padding: 12px;
+      background: #0d1b2a;
+      border-radius: 12px;
+      font-size: 0.85rem;
+      line-height: 1.5;
+    }
+    .msg { margin-bottom: 8px; }
+    .msg.user { color: #7eb8f7; }
+    .msg.assistant { color: #98e0a0; }
+    .msg-label { font-weight: 600; margin-right: 4px; }
+    #error-page {
+      display: none;
+      text-align: center;
+    }
+    #error-page h2 { color: #e74c3c; margin-bottom: 12px; }
+    #error-page p { color: #888; }
+    .waveform {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      height: 40px;
+      margin-bottom: 20px;
+    }
+    .bar {
+      width: 4px;
+      border-radius: 2px;
+      background: #0f3460;
+      transition: height 0.1s;
+    }
+    .bar.active { background: #3498db; }
+    .bar.speaking { background: #27ae60; }
+  </style>
+</head>
+<body>
+  <div class="card" id="main-card">
+    <h1>Schedule a Meeting</h1>
+    <p class="subtitle">Voice assistant — speak to book or reschedule</p>
+
+    <div class="waveform" id="waveform">
+      <div class="bar" style="height:8px"></div>
+      <div class="bar" style="height:16px"></div>
+      <div class="bar" style="height:24px"></div>
+      <div class="bar" style="height:16px"></div>
+      <div class="bar" style="height:8px"></div>
+      <div class="bar" style="height:20px"></div>
+      <div class="bar" style="height:12px"></div>
+    </div>
+
+    <div id="status" class="connecting">Connecting...</div>
+
+    <button id="mic-btn" disabled title="Push and hold to talk">🎤</button>
+
+    <div id="transcript"></div>
+  </div>
+
+  <div class="card" id="error-page">
+    <h2>🔗 Link Expired or Invalid</h2>
+    <p>This invite link has expired or is no longer valid.<br>Please contact the person who sent you this link.</p>
+  </div>
+
+  <script src="/sw-register.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
