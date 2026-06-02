@@ -18,14 +18,15 @@ let isRecording = false;
 let reconnectAttempts = 0;
 const MAX_RECONNECTS = 3;
 
-// Audio playback queue
 let audioQueue = [];
 let isPlaying = false;
 let playbackCtx = null;
+let nextPlayTime = 0;
+let totalBytesReceived = 0;
+let audioCtxInitialized = false;
 
 function getInviteToken() {
-  const params = new URLSearchParams(window.location.search);
-  return params.get('invite') || '';
+  return new URLSearchParams(window.location.search).get('invite') || '';
 }
 
 function setStatus(text, cls = '') {
@@ -51,15 +52,21 @@ function addTranscript(role, text) {
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
 }
 
+function addDebug(text) {
+  const div = document.createElement('div');
+  div.style.cssText = 'color:#555;font-size:0.75rem;margin:2px 0';
+  div.textContent = text;
+  transcriptEl.appendChild(div);
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
 function animateWaveform(active, speaking) {
   waveformBars.forEach((bar, i) => {
     if (active) {
-      const h = 8 + Math.random() * 28;
-      bar.style.height = h + 'px';
+      bar.style.height = (8 + Math.random() * 28) + 'px';
       bar.className = 'bar ' + (speaking ? 'speaking' : 'active');
     } else {
-      const heights = [8, 16, 24, 16, 8, 20, 12];
-      bar.style.height = (heights[i] || 8) + 'px';
+      bar.style.height = ([8,16,24,16,8,20,12][i] || 8) + 'px';
       bar.className = 'bar';
     }
   });
@@ -76,22 +83,21 @@ function stopWave() {
   animateWaveform(false, false);
 }
 
-async function getAudioContext() {
-  if (!audioCtx || audioCtx.state === 'closed') {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
-  }
-  if (audioCtx.state === 'suspended') {
-    await audioCtx.resume();
-  }
-  return audioCtx;
+async function initAudioContexts() {
+  if (audioCtxInitialized) return;
+  audioCtxInitialized = true;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+  playbackCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_SAMPLE_RATE });
+  addDebug(`AudioCtx: input=${audioCtx.sampleRate}Hz state=${audioCtx.state} | output=${playbackCtx.sampleRate}Hz state=${playbackCtx.state}`);
 }
 
-async function getPlaybackContext() {
-  if (!playbackCtx || playbackCtx.state === 'closed') {
+async function ensurePlaybackCtx() {
+  if (!playbackCtx) {
     playbackCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_SAMPLE_RATE });
   }
   if (playbackCtx.state === 'suspended') {
     await playbackCtx.resume();
+    addDebug(`Playback ctx resumed, state=${playbackCtx.state}`);
   }
   return playbackCtx;
 }
@@ -101,7 +107,6 @@ async function playAudioChunk(pcmData) {
   if (!isPlaying) processAudioQueue();
 }
 
-let nextPlayTime = 0;
 async function processAudioQueue() {
   if (audioQueue.length === 0) {
     isPlaying = false;
@@ -111,8 +116,8 @@ async function processAudioQueue() {
   const chunk = audioQueue.shift();
 
   try {
-    const ctx = await getPlaybackContext();
-    const int16 = new Int16Array(chunk.buffer || chunk);
+    const ctx = await ensurePlaybackCtx();
+    const int16 = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.byteLength / 2);
     const float32 = new Float32Array(int16.length);
     for (let i = 0; i < int16.length; i++) {
       float32[i] = int16[i] / 32768.0;
@@ -126,13 +131,13 @@ async function processAudioQueue() {
     source.connect(ctx.destination);
 
     const now = ctx.currentTime;
-    const startTime = Math.max(now, nextPlayTime);
+    const startTime = Math.max(now + 0.01, nextPlayTime);
     source.start(startTime);
     nextPlayTime = startTime + buffer.duration;
-
     source.onended = () => processAudioQueue();
   } catch (e) {
-    console.error('Audio playback error:', e);
+    console.error('Playback error:', e);
+    addDebug('Playback error: ' + e.message);
     isPlaying = false;
     processAudioQueue();
   }
@@ -146,10 +151,7 @@ function clearAudioQueue() {
 
 function connect() {
   const invite = getInviteToken();
-  if (!invite) {
-    showError();
-    return;
-  }
+  if (!invite) { showError(); return; }
 
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsUrl = `${proto}//${location.host}/ws?invite=${encodeURIComponent(invite)}`;
@@ -159,41 +161,44 @@ function connect() {
 
   ws.onopen = () => {
     reconnectAttempts = 0;
-    setStatus('Ready — press 🎤 to speak', '');
-    micBtn.disabled = false;
+    setStatus('Starting session...', 'connecting');
+    addDebug('WebSocket connected');
   };
 
   ws.onmessage = async (event) => {
     if (event.data instanceof Blob) {
       const buf = await event.data.arrayBuffer();
+      totalBytesReceived += buf.byteLength;
+      addDebug(`Audio received: ${buf.byteLength}b (total ${totalBytesReceived}b)`);
       setStatus('Speaking...', 'speaking');
       startWave(true);
+      // Ensure playback context exists even without prior user gesture (may fail on Safari)
       await playAudioChunk(new Uint8Array(buf));
     } else {
       try {
         const msg = JSON.parse(event.data);
-        if (msg.type === 'error' && msg.code === 4001) {
-          showError();
-          ws.close();
-          return;
-        }
+        if (msg.type === 'error' && msg.code === 4001) { showError(); ws.close(); return; }
         if (msg.type === 'transcript') {
           addTranscript(msg.role, msg.text);
         }
         if (msg.type === 'turn_complete') {
           setStatus('Ready — press 🎤 to speak', '');
           stopWave();
+          micBtn.disabled = false;
         }
         if (msg.type === 'error') {
           setStatus('Error — refresh page', 'error');
+          addDebug('Server error: ' + JSON.stringify(msg));
           stopWave();
         }
+        addDebug('JSON: ' + JSON.stringify(msg));
       } catch {}
     }
   };
 
-  ws.onerror = () => {
+  ws.onerror = (e) => {
     setStatus('Connection error', 'error');
+    addDebug('WS error: ' + e.type);
     stopWave();
   };
 
@@ -202,11 +207,9 @@ function connect() {
     stopRecording();
     stopWave();
     clearAudioQueue();
+    addDebug(`WS closed: code=${event.code} reason=${event.reason}`);
 
-    if (event.code === 4001) {
-      showError();
-      return;
-    }
+    if (event.code === 4001) { showError(); return; }
 
     if (reconnectAttempts < MAX_RECONNECTS) {
       reconnectAttempts++;
@@ -221,21 +224,28 @@ function connect() {
 
 async function startRecording() {
   if (isRecording) return;
+  await initAudioContexts();
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
+
   isRecording = true;
   micBtn.classList.add('active');
   setStatus('Listening...', 'listening');
   startWave(false);
   clearAudioQueue();
+  nextPlayTime = 0;
 
   try {
-    const ctx = await getAudioContext();
-    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: SAMPLE_RATE, channelCount: 1 }, video: false });
-    const source = ctx.createMediaStreamSource(mediaStream);
-
-    scriptProcessor = ctx.createScriptProcessor(4096, 1, 1);
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: { sampleRate: SAMPLE_RATE, channelCount: 1, echoCancellation: true, noiseSuppression: true },
+      video: false
+    });
+    addDebug('Mic acquired');
+    const source = audioCtx.createMediaStreamSource(mediaStream);
+    scriptProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
     source.connect(scriptProcessor);
-    scriptProcessor.connect(ctx.destination);
+    scriptProcessor.connect(audioCtx.destination);
 
+    let framesSent = 0;
     scriptProcessor.onaudioprocess = (e) => {
       if (!isRecording || !ws || ws.readyState !== WebSocket.OPEN) return;
       const float32 = e.inputBuffer.getChannelData(0);
@@ -244,9 +254,13 @@ async function startRecording() {
         int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32767)));
       }
       ws.send(int16.buffer);
+      framesSent++;
+      if (framesSent === 1 || framesSent % 20 === 0) {
+        addDebug(`Mic frame ${framesSent}: ${int16.buffer.byteLength}b, rate=${audioCtx.sampleRate}Hz`);
+      }
     };
   } catch (err) {
-    console.error('Mic error:', err);
+    addDebug('Mic error: ' + err.message);
     setStatus('Microphone access denied', 'error');
     isRecording = false;
     micBtn.classList.remove('active');
@@ -257,38 +271,14 @@ function stopRecording() {
   if (!isRecording) return;
   isRecording = false;
   micBtn.classList.remove('active');
-
-  if (scriptProcessor) {
-    scriptProcessor.disconnect();
-    scriptProcessor = null;
-  }
-  if (mediaStream) {
-    mediaStream.getTracks().forEach(t => t.stop());
-    mediaStream = null;
-  }
+  if (scriptProcessor) { scriptProcessor.disconnect(); scriptProcessor = null; }
+  if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+  addDebug('Mic stopped');
 }
 
-// Push-to-talk
-micBtn.addEventListener('mousedown', async () => {
-  if (!audioCtx) {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
-    playbackCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_SAMPLE_RATE });
-  }
-  await startRecording();
-});
-
+micBtn.addEventListener('mousedown', async () => { await initAudioContexts(); await startRecording(); });
 micBtn.addEventListener('mouseup', () => stopRecording());
-micBtn.addEventListener('touchstart', async (e) => {
-  e.preventDefault();
-  if (!audioCtx) {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
-    playbackCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_SAMPLE_RATE });
-  }
-  await startRecording();
-}, { passive: false });
-micBtn.addEventListener('touchend', (e) => {
-  e.preventDefault();
-  stopRecording();
-});
+micBtn.addEventListener('touchstart', async (e) => { e.preventDefault(); await initAudioContexts(); await startRecording(); }, { passive: false });
+micBtn.addEventListener('touchend', (e) => { e.preventDefault(); stopRecording(); });
 
 connect();
