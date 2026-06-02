@@ -161,7 +161,8 @@ function connect() {
 
   ws.onopen = () => {
     reconnectAttempts = 0;
-    setStatus('Starting session...', 'connecting');
+    setStatus('Ready — press and hold 🎤 to speak', '');
+    micBtn.disabled = false;
     addDebug('WebSocket connected');
   };
 

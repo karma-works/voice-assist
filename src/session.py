@@ -160,11 +160,7 @@ async def run_session(websocket) -> None:
 
     try:
         async with client.aio.live.connect(model=GEMINI_MODEL, config=config) as session:
-            # Send a greeting immediately so we can test server→browser audio without mic input
-            await session.send_client_content(
-                turns=[{"role": "user", "parts": [{"text": "Greet the visitor briefly and ask what the meeting is about."}]}],
-                turn_complete=True,
-            )
+            logger.info("Gemini Live session opened")
             receive_task = asyncio.create_task(_receive_from_gemini(session, websocket))
             send_task = asyncio.create_task(_send_from_client(session, websocket))
 
@@ -173,16 +169,20 @@ async def run_session(websocket) -> None:
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
+            for task in done:
+                name = "receive" if task is receive_task else "send"
+                exc = task.exception()
+                if exc:
+                    logger.error("Session task '%s' raised: %s", name, exc)
+                else:
+                    logger.info("Session task '%s' exited cleanly", name)
+
             for task in pending:
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
-
-            for task in done:
-                if task.exception():
-                    logger.error(f"Session task error: {task.exception()}")
 
     except Exception as e:
         logger.error(f"Session error: {e}\n{traceback.format_exc()}")
