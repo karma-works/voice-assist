@@ -1,4 +1,5 @@
 import asyncio
+import json
 import traceback
 from datetime import datetime
 
@@ -221,42 +222,45 @@ async def _send_from_client(session, websocket) -> None:
 
 async def _receive_from_gemini(session, websocket) -> None:
     try:
-        async for response in session.receive():
-            if response.data:
-                await websocket.send_bytes(response.data)
+        # session.receive() stops after each turn_complete by SDK design — outer loop
+        # keeps the session alive across multiple conversation turns.
+        while True:
+            async for response in session.receive():
+                if response.data:
+                    await websocket.send_bytes(response.data)
 
-            if response.tool_call:
-                tool_responses = []
-                for fc in response.tool_call.function_calls:
-                    result = await _dispatch_tool(fc.name, fc.args or {})
-                    tool_responses.append(
-                        types.FunctionResponse(
-                            name=fc.name,
-                            id=fc.id,
-                            response={"result": result},
+                if response.tool_call:
+                    tool_responses = []
+                    for fc in response.tool_call.function_calls:
+                        result = await _dispatch_tool(fc.name, fc.args or {})
+                        tool_responses.append(
+                            types.FunctionResponse(
+                                name=fc.name,
+                                id=fc.id,
+                                response={"result": result},
+                            )
                         )
-                    )
-                await session.send_tool_response(function_responses=tool_responses)
+                    await session.send_tool_response(function_responses=tool_responses)
 
-            if response.server_content:
-                sc = response.server_content
+                if response.server_content:
+                    sc = response.server_content
 
-                if sc.input_transcription and sc.input_transcription.text:
-                    await websocket.send_json({
-                        "type": "transcript",
-                        "role": "user",
-                        "text": sc.input_transcription.text,
-                    })
+                    if sc.input_transcription and sc.input_transcription.text:
+                        await websocket.send_json({
+                            "type": "transcript",
+                            "role": "user",
+                            "text": sc.input_transcription.text,
+                        })
 
-                if sc.output_transcription and sc.output_transcription.text:
-                    await websocket.send_json({
-                        "type": "transcript",
-                        "role": "assistant",
-                        "text": sc.output_transcription.text,
-                    })
+                    if sc.output_transcription and sc.output_transcription.text:
+                        await websocket.send_json({
+                            "type": "transcript",
+                            "role": "assistant",
+                            "text": sc.output_transcription.text,
+                        })
 
-                if sc.turn_complete:
-                    await websocket.send_json({"type": "turn_complete"})
+                    if sc.turn_complete:
+                        await websocket.send_json({"type": "turn_complete"})
 
     except Exception as e:
         if "disconnect" not in str(e).lower():

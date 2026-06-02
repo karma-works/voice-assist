@@ -128,9 +128,7 @@ async function drainAudioQueue() {
     const start = Math.max(now + 0.005, nextPlayTime);
     nextPlayTime = start + buf.duration;
     src.start(start);
-    // Belt-and-suspenders: onended + setTimeout fallback
     src.onended = drainAudioQueue;
-    setTimeout(drainAudioQueue, Math.max(0, (nextPlayTime - now - 0.02) * 1000));
   } catch(e) {
     dbg('Playback err: ' + e.message);
     isPlaying = false;
