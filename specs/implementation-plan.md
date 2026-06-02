@@ -1,6 +1,8 @@
 # Implementation Plan: voice-assist
 
-_Revised 2026-05-30 — visitor-facing scheduling tool_
+_Revised 2026-06-02 — aligned with Pipecat pipeline and optional phone collection_
+
+> This is the original week-by-week MVP plan, updated to avoid contradicting the 2026-06-02 next-level decisions. For the detailed migration plan, see [next-level-implementation-plan.md](next-level-implementation-plan.md).
 
 ## Realistic Timeline Assessment
 
@@ -54,16 +56,17 @@ Solo developer, moderate infrastructure complexity. The core voice + availabilit
       start: datetime,
       end: datetime,
       visitor_name: str,
-      visitor_email: str,
+      visitor_phone: str | None,
       topic: str,
   ) -> str  # returns event_id
-  # Creates event, adds visitor as guest → Google sends them a calendar invite
+  # Creates event for Christian; visitor confirmation is spoken in-session
   ```
 - [ ] Verify: freebusy query covers ALL Christian's calendars (calendarList.list), not just primary
 - [ ] Verify: business slots (Mon–Fri 7–15 Berlin) correctly computed
 - [ ] Verify: private slots (any day 0–22 Berlin) correctly computed
 - [ ] Verify: DST edge case — test a slot around last Sunday of March and October
-- [ ] Verify: event creation adds visitor email as guest (Google Calendar sends invite automatically)
+- [ ] Verify: event creation does not require visitor email
+- [ ] Verify: optional confirmed phone number is stored according to ADR-011
 - [ ] Wire `CalendarService` into the Pipecat prototype from Week 1
 - [ ] Test end-to-end: voice query → real calendar slots → booking appears in Google Calendar
 - [ ] **Milestone:** Full booking flow on real calendar, locally
@@ -74,16 +77,16 @@ Solo developer, moderate infrastructure complexity. The core voice + availabilit
 
 **Goal:** `find_meeting_at` and `reschedule_meeting` work correctly. Privacy guarantees verified.
 
-- [ ] Implement `find_meeting_at(approx_datetime, visitor_email, tolerance_minutes=30)`:
+- [ ] Implement `find_meeting_at(approx_datetime, visitor_phone=None, tolerance_minutes=30)`:
   - Queries Google Calendar events API for events in ±tolerance window
   - Returns `{event_id, start, end, found: bool}` — **no title, no description, no other guests**
-  - If visitor_email provided: only returns found=True if visitor is in the guest list
+  - If phone matching exists, use only confirmed phone metadata stored by the app
   - If multiple matches: returns all of them (agent disambiguates)
 - [ ] Implement `reschedule_meeting(event_id, new_start, new_end)`:
   - Calls Google Calendar events.patch()
-  - Google Calendar sends updated invite to all existing guests automatically
+  - Agent confirms the update in-session
 - [ ] Implement `get_available_slots` for reschedule context (same logic as booking)
-- [ ] Add all 4 tools to Gemini Live session config
+- [ ] Add all 4 tools to the Pipecat `GeminiLiveLLMService` configuration
 - [ ] Privacy verification:
   - [ ] System prompt explicitly states model cannot reveal event details
   - [ ] Confirm `find_meeting_at` never returns event title in any code path
@@ -138,14 +141,18 @@ Solo developer, moderate infrastructure complexity. The core voice + availabilit
 - [ ] `WebSocket /ws?invite=<uuid>`:
   1. Validate invite UUID (Firestore)
   2. If invalid: `close(4001)`
-  3. If valid: build Pipecat pipeline, open Gemini Live session
+  3. If valid: build Pipecat pipeline with `GeminiLiveLLMService`
   4. Session lifecycle: on disconnect, clean up Pipecat pipeline
 - [ ] Implement system prompt builder:
   - Inject: current datetime (Europe/Berlin, in English)
   - Privacy rules: "You can only see time availability. Never reveal what existing meetings are called."
   - Language detection: "Detect the visitor's language from their first message and respond in that language for the entire session."
   - Meeting type inference rules
-  - Confirmation policy: "Always confirm visitor name and email letter-by-letter before booking."
+  - Confirmation policy: "Always confirm visitor name and selected slot before booking. Ask whether the visitor wants to provide an optional phone number; if yes, collect it in chunks and confirm grouped readback before storing."
+- [ ] Add readiness endpoint:
+  - Voice API active/usable
+  - Calendar connected/freebusy-safe check works
+  - No calendar contents returned
 - [ ] Tool dispatch wired: all 4 tools routed to `CalendarService`
 - [ ] Session error handling: if Gemini Live drops, log and send a WS close frame so PWA can show a reconnect prompt
 - [ ] **Milestone:** Full voice → calendar session runs end-to-end via WebSocket, locally
@@ -160,6 +167,8 @@ Solo developer, moderate infrastructure complexity. The core voice + availabilit
   - On load: extract `?invite=` from URL
   - If missing: show "This link is invalid" static page
   - If present: show "Start" button
+  - Before enabling Start: show voice API readiness and calendar readiness
+  - If voice or calendar readiness fails: disable Start and show outage message
   - Status indicator: Connecting / Ready / Listening / Speaking / Error
   - "Restart session" button
 - [ ] `static/app.js`:
@@ -204,7 +213,9 @@ Solo developer, moderate infrastructure complexity. The core voice + availabilit
 
 - [ ] Invite link generation workflow produces a valid URL via `workflow_dispatch`
 - [ ] Expired/invalid links show error page with no voice session
-- [ ] Visitor can book a meeting via voice (event appears in Google Calendar with guest invite)
+- [ ] Visitor can book a meeting via voice (event appears in Christian's Google Calendar)
+- [ ] UI shows voice API and calendar readiness before voice starts
+- [ ] If voice or calendar readiness fails, UI shows an outage message instead of opening a broken session
 - [ ] Visitor can reschedule an existing meeting via voice
 - [ ] Agent never reveals existing meeting titles under direct questioning
 - [ ] Business slots land only Mon–Fri 07:00–15:00 Europe/Berlin
@@ -218,7 +229,7 @@ Solo developer, moderate infrastructure complexity. The core voice + availabilit
 
 - Admin endpoint: `GET /admin/invite/new?label=X` authenticated via Google OAuth (faster than GitHub Actions)
 - Invite link revocation: update Firestore `status` to `revoked` via admin endpoint
-- Email spell-out confirmation: agent reads visitor email letter-by-letter before booking
+- Optional SMS, WhatsApp, or confirmation-page channel for visitor-side confirmation
 - Proactive slot suggestion: agent suggests 3 concrete slots upfront rather than asking visitor to propose dates
 - Meeting duration inference: agent asks visitor how long the meeting should be (default: 30 min if not specified)
 - Visitor timezone detection: agent asks and confirms time in both timezones

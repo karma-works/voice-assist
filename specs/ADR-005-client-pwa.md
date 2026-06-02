@@ -26,6 +26,8 @@ Build the client as a **Progressive Web App (PWA)** using vanilla HTML/JavaScrip
 **PWA features for MVP:**
 - `manifest.json` (name, icon, theme color)
 - Single-page app: one view, push-to-talk button, status indicator, recent utterances
+- Explicit readiness display for voice API usability and Google Calendar connectivity
+- Outage message with Start disabled when voice or calendar readiness fails
 - Service worker: offline page only (not full offline capability — real-time voice requires connectivity)
 - Web Audio API: capture mic audio as PCM, play back received audio
 - WebSocket: connect to backend WebSocket endpoint for voice streaming
@@ -43,4 +45,5 @@ Build the client as a **Progressive Web App (PWA)** using vanilla HTML/JavaScrip
 - PWA must request microphone permission on first load and explain why.
 - Audio context must be initialized inside a click handler (Safari/Chrome autoplay policy).
 - WebSocket reconnect with exponential backoff is required in the PWA JavaScript.
+- The PWA must call a backend readiness endpoint before opening voice and must not start the session if the voice API or calendar connection is unavailable.
 - The PWA must handle the Google OAuth redirect flow (receive the auth code and exchange it for a session).

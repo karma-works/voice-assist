@@ -1,6 +1,6 @@
 # Challenges: Assumptions That Could Sink This
 
-_Revised 2026-05-30_
+_Revised 2026-06-02_
 
 ---
 
@@ -159,17 +159,17 @@ _Revised 2026-05-30_
 
 ---
 
-## Challenge 11: Visitor provides wrong email address
+## Challenge 11: Visitor provides wrong phone number
 
-**Assumption:** The email address the visitor provides in the voice session is spelled correctly and belongs to them.
+**Assumption:** If the visitor chooses to provide a phone number, the captured number is correct and usable.
 
-**Most likely failure mode:** Visitor dictates an email with a typo ("max at gmale dot com"). The Google Calendar invite is sent to a non-existent address. Visitor never receives confirmation.
+**Most likely failure mode:** Visitor speaks a long number in one utterance, pauses in unexpected places, includes a country code or leading zero, and the system drops or transposes digits.
 
-**Failure consequence:** Visitor shows up to the meeting; no calendar entry on their side. Confusion.
+**Failure consequence:** Christian has a wrong callback number, or the visitor thinks the number was captured when it was not.
 
-**Counter-evidence strength:** Strong. Spoken email addresses are error-prone. People routinely misspell them or forget domains.
+**Counter-evidence strength:** Strong. Spoken digit strings are easier than email addresses, but long numbers are still error-prone.
 
-**Mitigation:** After the visitor dictates their email, the agent must read it back letter-by-letter for confirmation: "I have m-a-x at g-m-a-i-l dot c-o-m — is that correct?" Only proceed to booking after explicit "yes."
+**Mitigation:** Phone number is optional. If provided, collect it in chunks, preserve country codes and leading zeros, and read it back using grouped pacing before storing it. Only store after explicit confirmation. If confirmation fails repeatedly, continue booking without a phone number.
 
 ---
 

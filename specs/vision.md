@@ -1,10 +1,10 @@
 # Vision: voice-assist (Scheduling Assistant)
 
-_Revised 2026-05-30 — pivot from personal assistant to external scheduling tool_
+_Revised 2026-06-02 — Pipecat pipeline, optional phone collection_
 
 ## What It Is
 
-voice-assist is a voice-based scheduling assistant that external visitors use to book or reschedule meetings with Christian. A visitor receives an invite link (valid 10 days), opens it in a browser, and speaks with an AI agent that finds an available time, books the meeting directly in Christian's Google Calendar, and sends the visitor a calendar invite — all without Christian being present or manually involved. The agent speaks the visitor's language, infers whether the meeting is personal or professional, and respects Christian's corresponding time slot rules.
+voice-assist is a voice-based scheduling assistant that external visitors use to book or reschedule meetings with Christian. A visitor receives an invite link (valid 10 days), opens it in a browser, and speaks with an AI agent that finds an available time and books the meeting directly in Christian's Google Calendar — all without Christian being present or manually involved. The agent speaks the visitor's language, infers whether the meeting is personal or professional, optionally collects a phone number, and respects Christian's corresponding time slot rules.
 
 ## What It Is Not
 
@@ -22,14 +22,15 @@ A person who received an invite link from Christian. They may be a business cont
 
 ### Secondary: Christian (link owner / calendar admin)
 
-Christian generates invite links via a GitHub Actions `workflow_dispatch`. He does not interact with the app UI. His role is entirely administrative: generate links, manage his Google Calendar, and receive booked meetings as Google Calendar events (with automatic guest invite sent to the visitor).
+Christian generates invite links via a GitHub Actions `workflow_dispatch`. He does not interact with the visitor app UI. His role is administrative: generate links, manage his Google Calendar, and receive booked meetings as Google Calendar events. Visitor-side confirmation is spoken in-session unless a later SMS, WhatsApp, or confirmation-page channel is added.
 
 ## Success Criteria (MVP)
 
-1. **Invite link works end-to-end** — A `workflow_dispatch` run produces a valid invite URL. A visitor opens it, has a voice conversation, and a meeting appears in Christian's Google Calendar with the visitor as a guest, within the same session.
+1. **Invite link works end-to-end** — A `workflow_dispatch` run produces a valid invite URL. A visitor opens it, has a voice conversation, and a meeting appears in Christian's Google Calendar within the same session.
 2. **Privacy holds** — The agent never says the title, participant, or topic of any existing meeting. It only confirms availability.
 3. **Time slot rules are respected** — Business meetings land Mon–Fri 7:00–15:00 (Europe/Berlin). Private meetings land any day 0:00–22:00 (Europe/Berlin). No exceptions.
 4. **Links expire correctly** — A link older than 10 days is rejected at session start with a clear message. A valid link is never rejected.
 5. **Language auto-detection works** — The agent detects and matches the visitor's spoken language within the first exchange (no manual selection required).
 6. **Postpone works** — A visitor who knows the approximate date and context of an existing meeting can reschedule it to a new slot via the same voice flow.
-7. **Infrastructure is code** — Full teardown and redeploy from `terraform apply` works without manual steps (after bootstrap).
+7. **Readiness is explicit** — Before voice starts, the UI shows whether the voice API is usable and whether Google Calendar is connected. If either is down, the visitor sees an outage message.
+8. **Infrastructure is code** — Full teardown and redeploy from `terraform apply` works without manual steps (after bootstrap).

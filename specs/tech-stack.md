@@ -1,6 +1,6 @@
 # Tech Stack: voice-assist
 
-_Revised 2026-05-30 — pivot to visitor-facing scheduling tool_
+_Revised 2026-06-02 — Pipecat orchestration boundary_
 
 ## Summary Table
 
@@ -19,7 +19,7 @@ _Revised 2026-05-30 — pivot to visitor-facing scheduling tool_
 | IaC | Terraform | Decided | ADR-007 |
 | CI/CD + invite generation | GitHub Actions | Decided | ADR-007 |
 | Secrets | GitHub Secrets + GCP Secret Manager | Decided | ADR-002 |
-| Voice pipeline framework | Pipecat | Decided | — |
+| Voice pipeline framework | Pipecat + `GeminiLiveLLMService` | Decided | ADR-009 |
 
 ---
 
@@ -45,11 +45,11 @@ _Revised 2026-05-30 — pivot to visitor-facing scheduling tool_
 
 ### Pipecat (voice pipeline framework)
 
-**Rationale:** Pipecat (by Daily.co) is the leading open-source framework for building real-time voice AI pipelines. It has first-class Gemini Live support, handles WebSocket session management, VAD, barge-in signaling, and turn detection. It integrates with moss. Using it avoids re-inventing 2,000 lines of audio pipeline code.
+**Rationale:** Pipecat (by Daily.co) is the leading open-source framework for building real-time voice AI pipelines. It has first-class Gemini Live support through `GeminiLiveLLMService`, supports composable processors, and gives the app explicit insertion points for middleware, audio filters, text filters, metrics, and state handling.
 
 **Trade-off accepted:** Another dependency. Pipecat is relatively new (v0.x in 2024, v1.x in 2025). If it breaks or the project stalls, the wrapping abstractions become a liability.
 
-**Alternative considered:** Build raw WebSocket proxy with `websockets` library. Rejected: too much low-level audio handling that's already solved in Pipecat.
+**Alternative considered:** Build raw WebSocket proxy with `websockets` library. Rejected: too much low-level audio handling that's already solved in Pipecat, and too little structure for the custom middleware goal.
 
 ---
 

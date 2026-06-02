@@ -2,7 +2,7 @@
 
 **Status:** Decided  
 **Date:** 2026-05-30  
-_Revised 2026-05-30 — visitor auth is now invite links, not Google OAuth_
+_Revised 2026-06-02 — visitor auth is invite links; visitor contact is optional phone_
 
 ## Context
 
@@ -56,7 +56,7 @@ PWA extracts UUID, connects WebSocket: wss://backend/ws?invite=<uuid>
   ↓
 Backend: validate_invite(uuid) → Firestore lookup
   ↓ valid              ↓ invalid/expired
-Open Gemini Live    WS close(4001) + PWA shows error
+Open Pipecat voice  WS close(4001) + PWA shows error
 session
 ```
 
@@ -65,7 +65,7 @@ The UUID is transmitted as a WebSocket query parameter over HTTPS/WSS. It is nev
 ## What This Option Does NOT Do Well
 
 - **Invite link forwarding risk:** Anyone who receives the URL can use it within 10 days. This is a deliberate trade-off (see challenges.md #3).
-- **No visitor identity verification:** The system trusts that the visitor is who they say they are (name + email they provide in the voice session). There's no proof the email belongs to them.
+- **No visitor identity verification:** The system trusts that the visitor is who they say they are. The optional phone number is contact metadata, not identity proof.
 - **Google OAuth 7-day token expiry for unverified apps:** If the OAuth app is not published/verified by Google, the refresh token expires after 7 days. Must either (a) complete Google OAuth verification, or (b) implement a re-auth script that Christian runs when the token expires. Option (b) is simpler for a personal tool.
 
 ## Consequences
@@ -73,5 +73,5 @@ The UUID is transmitted as a WebSocket query parameter over HTTPS/WSS. It is nev
 - No Google sign-in UI in the visitor-facing PWA.
 - `authorize_calendar.py` script committed to `scripts/` — Christian runs this once, or when the refresh token expires.
 - Backend reads refresh token from GCP Secret Manager at startup, refreshes access token automatically via `google-auth` library.
-- WebSocket handler validates invite UUID before any Gemini Live session is opened.
+- WebSocket handler validates invite UUID before any Pipecat/Gemini Live voice pipeline is opened.
 - Terraform provisions: Secret Manager secrets for OAuth credentials and refresh token; IAM binding for Cloud Run service account to read those secrets.

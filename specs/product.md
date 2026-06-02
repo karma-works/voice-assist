@@ -1,6 +1,6 @@
 # Product Specification: voice-assist
 
-_Revised 2026-05-30_
+_Revised 2026-06-02_
 
 ## User Types
 
@@ -20,28 +20,31 @@ _Revised 2026-05-30_
 3. Visitor opens the URL in a browser.
 4. Backend validates the invite UUID: exists in Firestore, not expired (< 10 days old). If invalid/expired → show static error page, no voice session.
 5. Visitor clicks "Start" (push-to-talk activates; PWA requests mic permission).
-6. Backend opens a Gemini Live session. System prompt contains: Christian's name, current datetime (Europe/Berlin), availability rules (business/private), strict privacy instructions.
-7. Agent greets the visitor, asks what the meeting is about.
-8. Based on the topic/context, agent infers meeting type:
+6. UI shows readiness: voice API active/usable and Google Calendar connected. If either check fails, show an outage message and do not start the voice session.
+7. Backend opens a Pipecat pipeline with `GeminiLiveLLMService`. System prompt contains: Christian's name, current datetime (Europe/Berlin), availability rules (business/private), strict privacy instructions, phone-number collection procedure, and voice best-practice instructions.
+8. Agent greets the visitor, asks what the meeting is about.
+9. Based on the topic/context, agent infers meeting type:
    - Professional/work-related → applies business slot rules (Mon–Fri 07:00–15:00 Europe/Berlin)
    - Personal/private → applies private slot rules (any day 00:00–22:00 Europe/Berlin)
-9. Agent calls `get_available_slots(date_range, meeting_duration_minutes, slot_type)`.
-10. Backend calls Google Calendar API (freebusy query — no event details, just busy/free times).
-11. Agent presents 3 concrete slot options: "I have Tuesday 10am, Wednesday 9am, or Thursday 2pm available."
-12. Visitor picks one (or asks for alternatives).
-13. Agent asks for visitor's name and email address.
-14. Agent confirms: "I'll book Tuesday June 3rd at 10am for you, [Name]. Shall I confirm?"
-15. Visitor confirms.
-16. Agent calls `book_meeting(slot, visitor_name, visitor_email, topic, meeting_type)`.
-17. Backend creates Google Calendar event with visitor as guest. Google Calendar sends the visitor an invite email automatically.
-18. Agent confirms: "Done — you'll receive a calendar invite at [email]."
-19. Session ends. Invite link remains valid until 10 days are up (multi-use).
+10. Agent calls `get_available_slots(date_range, meeting_duration_minutes, slot_type)`.
+11. Backend calls Google Calendar API (freebusy query — no event details, just busy/free times).
+12. Agent presents 3 concrete slot options: "I have Tuesday 10am, Wednesday 9am, or Thursday 2pm available."
+13. Visitor picks one (or asks for alternatives).
+14. Agent asks for visitor's name.
+15. Agent asks whether the visitor wants to provide a phone number. The phone number is optional.
+16. If the visitor says yes, agent captures the phone number in chunks, handles country code and leading zeros, and verifies it with grouped readback.
+17. Agent confirms: "I'll book Tuesday June 3rd at 10am for you, [Name]. Shall I confirm?"
+18. Visitor confirms.
+19. Agent calls `book_meeting(slot, visitor_name, visitor_phone, topic, meeting_type)`.
+20. Backend creates Google Calendar event for Christian. No visitor email guest is required.
+21. Agent confirms the booking in-session.
+22. Session ends. Invite link remains valid until 10 days are up (multi-use).
 
 ### Flow 2: Reschedule an Existing Meeting
 
 1. (Same steps 1–6 as above)
 2. Visitor says: "I have a meeting with Christian on Tuesday the 3rd at 2pm — can we move it?"
-3. Agent does NOT look up what the meeting is called. It calls `find_meeting_at(datetime)` which returns only: event_id, start time, end time, and whether the visitor's email is in the guest list (binary match, no title exposed).
+3. Agent does NOT look up what the meeting is called. It calls `find_meeting_at(datetime)` which returns only: event_id, start time, end time, and whether a safe match exists. It must not expose title, description, or other guests.
 4. If a match is found at that time: agent confirms "I found a meeting at that time. What would you like to change it to?"
 5. Visitor proposes a new date/time range or asks for suggestions.
 6. Agent calls `get_available_slots(...)` for the new range.
@@ -49,7 +52,7 @@ _Revised 2026-05-30_
 8. Visitor picks one.
 9. Agent confirms the new time.
 10. Agent calls `reschedule_meeting(event_id, new_start, new_end)`.
-11. Backend updates the Google Calendar event. Google Calendar sends updated invite to all guests.
+11. Backend updates the Google Calendar event and the agent confirms the change in-session.
 12. Agent confirms the reschedule.
 
 ### Flow 3: Invite Link Generation (Admin, GitHub Actions)
@@ -67,11 +70,24 @@ _Revised 2026-05-30_
 | Tool | Description | What it does NOT expose |
 |---|---|---|
 | `get_available_slots(date_range, duration_min, slot_type)` | Returns list of available time windows | Does not reveal what is blocking each slot |
-| `book_meeting(slot, visitor_name, visitor_email, topic, meeting_type)` | Creates calendar event with visitor as guest | — |
-| `find_meeting_at(datetime_approx, visitor_email)` | Returns event_id + confirmed time if a match exists | Does NOT return title, description, or other guests |
-| `reschedule_meeting(event_id, new_start_datetime, new_end_datetime)` | Updates event time, triggers Google Calendar guest notification | — |
+| `book_meeting(slot, visitor_name, visitor_phone, topic, meeting_type)` | Creates calendar event for Christian and stores optional confirmed phone number | Does not require visitor email |
+| `find_meeting_at(datetime_approx, visitor_phone)` | Returns event_id + confirmed time if a safe match exists | Does NOT return title, description, or other guests |
+| `reschedule_meeting(event_id, new_start_datetime, new_end_datetime)` | Updates event time | Does not expose existing event details |
 
-The `find_meeting_at` tool matches on time (±30 min tolerance) and optionally validates that the visitor's email is a guest. If no match or email mismatch: returns `{found: false}`. The agent responds: "I couldn't find a meeting at that time associated with your email."
+The `find_meeting_at` tool matches on time (±30 min tolerance). If phone-number matching is implemented, it may validate against a confirmed phone number stored by the app, but it must not expose guest details. If no safe match exists, returns `{found: false}`. The agent responds: "I couldn't find a meeting at that time."
+
+---
+
+## Readiness and Outage UI
+
+Before enabling the voice conversation, the UI must show two explicit readiness states:
+
+| Dependency | Ready state | Outage state |
+|---|---|---|
+| Voice API | Gemini Live/Pipecat session can be created and audio can be streamed | "Voice service is temporarily unavailable. Please try again later." |
+| Calendar | Google Calendar credentials are valid and freebusy can be queried | "Calendar connection is unavailable. Scheduling is temporarily offline." |
+
+If either dependency is unavailable, the Start control is disabled and the visitor sees an outage message instead of a broken voice session. The backend should expose a readiness endpoint that checks both dependencies without revealing calendar contents.
 
 ---
 
@@ -118,7 +134,9 @@ The agent infers `slot_type` from the conversation. The system prompt instructs:
 | Private slot rules (any day 0–22) | ✅ | | Server-side enforcement |
 | Meeting type inference from context | ✅ | | System prompt + agent reasoning |
 | Auto-detect visitor language | ✅ | | Gemini Live multi-language |
-| Google Calendar invite to visitor | ✅ | | Add visitor as guest on event creation |
+| Optional phone-number collection | ✅ | | Ask first, chunk capture, grouped readback confirmation |
+| Voice API readiness indicator | ✅ | | UI shows whether the voice session can start |
+| Calendar readiness indicator | ✅ | | UI shows outage if Google Calendar is not connected |
 | 15-min buffer around existing events | ✅ | | In `get_available_slots` |
 | Static expiry/invalid error page | ✅ | | No voice session if link invalid |
 | Admin endpoint to generate links | | ✅ | GitHub Actions is sufficient at MVP |

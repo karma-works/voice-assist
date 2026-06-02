@@ -22,7 +22,7 @@ Original requirement included "NVIDIA Nemotron Audio via OpenRouter." Investigat
 
 ## Decision
 
-Use **Gemini 2.0 Flash Live** as the voice-to-voice model, accessed directly via Google's API (WebSocket), not through OpenRouter.
+Use **Gemini 2.0 Flash Live** as the voice-to-voice model, accessed through Pipecat's `GeminiLiveLLMService`, not through OpenRouter and not through a hand-written raw socket proxy.
 
 ## Rationale
 
@@ -42,8 +42,8 @@ Use **Gemini 2.0 Flash Live** as the voice-to-voice model, accessed directly via
 
 ## Consequences
 
-- Backend must implement a WebSocket proxy (PWA → backend → Gemini Live).
+- Backend must expose a browser transport endpoint and build a Pipecat pipeline around `GeminiLiveLLMService`.
 - Google Cloud billing must be enabled for the `generativelanguage.googleapis.com` API.
 - A `GEMINI_API_KEY` secret must be provisioned and stored in GCP Secret Manager.
 - Session timeout must be managed: Gemini Live sessions are not indefinitely persistent.
-- Pipecat is the recommended framework to manage this integration.
+- See ADR-009 for the orchestration decision and middleware insertion points.

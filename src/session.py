@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import traceback
 from datetime import datetime
@@ -106,6 +107,9 @@ LANGUAGE RULES:
 - Swiss German is welcome — respond in standard German (Hochdeutsch) if they use Swiss German.
 - Never mix languages within a single response.
 - Keep responses short and natural — this is a voice conversation.
+- Speak in short fragments, with contractions in English where natural.
+- Output plain spoken text only: no markdown, bullet points, tables, URLs, code formatting, or emoji.
+- Say numbers, dates, times, email addresses, and symbols in a TTS-friendly way instead of relying on punctuation.
 
 YOUR CAPABILITIES:
 - Find available meeting slots
@@ -156,7 +160,8 @@ async def run_session(websocket) -> None:
         realtime_input_config=types.RealtimeInputConfig(
             automatic_activity_detection=types.AutomaticActivityDetection(
                 disabled=False,
-            )
+            ),
+            activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
         ),
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
@@ -213,6 +218,8 @@ async def _send_from_client(session, websocket) -> None:
                     data = json.loads(message["text"])
                     if data.get("type") == "end":
                         break
+                    if data.get("type") == "interrupt":
+                        await session.send_realtime_input(activity_start=types.ActivityStart())
                 except json.JSONDecodeError:
                     pass
     except Exception as e:
@@ -221,6 +228,35 @@ async def _send_from_client(session, websocket) -> None:
 
 
 async def _receive_from_gemini(session, websocket) -> None:
+    in_flight_tools: dict[str, asyncio.Task] = {}
+    send_tool_lock = asyncio.Lock()
+
+    async def execute_tool_call(fc) -> None:
+        try:
+            result = await _dispatch_tool(fc.name, fc.args or {})
+            if asyncio.current_task().cancelled():
+                return
+            response = types.FunctionResponse(
+                name=fc.name,
+                id=fc.id,
+                response={"result": result},
+            )
+            async with send_tool_lock:
+                await session.send_tool_response(function_responses=[response])
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("Tool call %s (%s) failed: %s", fc.id, fc.name, e)
+            response = types.FunctionResponse(
+                name=fc.name,
+                id=fc.id,
+                response={"result": {"error": str(e)}},
+            )
+            async with send_tool_lock:
+                await session.send_tool_response(function_responses=[response])
+        finally:
+            in_flight_tools.pop(fc.id, None)
+
     try:
         # session.receive() stops after each turn_complete by SDK design — outer loop
         # keeps the session alive across multiple conversation turns.
@@ -230,20 +266,23 @@ async def _receive_from_gemini(session, websocket) -> None:
                     await websocket.send_bytes(response.data)
 
                 if response.tool_call:
-                    tool_responses = []
-                    for fc in response.tool_call.function_calls:
-                        result = await _dispatch_tool(fc.name, fc.args or {})
-                        tool_responses.append(
-                            types.FunctionResponse(
-                                name=fc.name,
-                                id=fc.id,
-                                response={"result": result},
-                            )
-                        )
-                    await session.send_tool_response(function_responses=tool_responses)
+                    for fc in response.tool_call.function_calls or []:
+                        task = asyncio.create_task(execute_tool_call(fc))
+                        in_flight_tools[fc.id] = task
+
+                if response.tool_call_cancellation:
+                    for call_id in response.tool_call_cancellation.ids or []:
+                        task = in_flight_tools.pop(call_id, None)
+                        if task:
+                            task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await task
 
                 if response.server_content:
                     sc = response.server_content
+
+                    if sc.interrupted:
+                        await websocket.send_json({"type": "interrupted"})
 
                     if sc.input_transcription and sc.input_transcription.text:
                         await websocket.send_json({
@@ -265,6 +304,12 @@ async def _receive_from_gemini(session, websocket) -> None:
     except Exception as e:
         if "disconnect" not in str(e).lower():
             logger.error(f"Gemini receive error: {e}")
+    finally:
+        for task in in_flight_tools.values():
+            task.cancel()
+        for task in in_flight_tools.values():
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
 async def _dispatch_tool(name: str, args: dict) -> dict:

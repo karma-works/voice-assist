@@ -1,8 +1,8 @@
 # voice-assist — Specs Index
 
-_Revised 2026-05-30 — pivot: visitor-facing scheduling tool_
+_Revised 2026-06-02 — Pipecat pipeline + optional phone collection_
 
-A voice-based meeting scheduler. External visitors receive an invite link, open it in a browser, and use a voice conversation to book or reschedule a meeting with Christian. The agent respects availability rules (business vs. private time windows), never exposes calendar contents, and sends a Google Calendar invite to the visitor automatically.
+A voice-based meeting scheduler. External visitors receive an invite link, open it in a browser, and use a voice conversation to book or reschedule a meeting with Christian. The agent respects availability rules (business vs. private time windows), never exposes calendar contents, and uses a Pipecat pipeline around Gemini Live so custom voice middleware can be inserted cleanly.
 
 ## Documents
 
@@ -21,8 +21,13 @@ A voice-based meeting scheduler. External visitors receive an invite link, open 
 | [ADR-006](ADR-006-search-moss.md) | Semantic search: moss (post-MVP — freebusy API makes it irrelevant for MVP) |
 | [ADR-007](ADR-007-iac-terraform-github-actions.md) | IaC: Terraform + two GitHub Actions workflows (deploy + invite generation) |
 | [ADR-008](ADR-008-invite-links-firestore.md) | Invite link storage: Firestore with TTL-based expiry |
+| [ADR-009](ADR-009-pipecat-gemini-live-orchestration.md) | Voice orchestration: Pipecat + `GeminiLiveLLMService`, not raw Gemini sockets |
+| [ADR-010](ADR-010-voice-agent-runtime-best-practices.md) | Runtime best practices: latency, interruption, state, prompting, audio quality |
+| [ADR-011](ADR-011-optional-phone-number-collection.md) | Visitor contact collection: optional phone number instead of required email |
 | [gemini-live-function-calling.md](gemini-live-function-calling.md) | Deep dive: protocol, tool definitions, blocking vs non-blocking, barge-in during tool calls, latency budget |
 | [implementation-plan.md](implementation-plan.md) | Week-by-week 7-week Phase 0 + Phase 1/2 outlines |
+| [interview-next-level-2026-06-02.md](interview-next-level-2026-06-02.md) | Interview notes and resulting next-level decisions |
+| [next-level-implementation-plan.md](next-level-implementation-plan.md) | Migration plan for Pipecat, middleware, voice best practices, and phone-number flow |
 
 ## Key Decisions (one line each)
 
@@ -33,7 +38,9 @@ A voice-based meeting scheduler. External visitors receive an invite link, open 
 - **Invite generation via GitHub Actions `workflow_dispatch`.** No admin UI at MVP — Christian opens the Actions tab.
 - **Firestore for invite storage.** GCP-native, free tier, TTL auto-expiry, atomic reads.
 - **Cloud Run min_instances=1.** Visitors should never hit a cold start when opening a link they just received.
-- **Google Calendar guest model for visitor invites.** Adding visitor's email as a guest triggers an automatic Google Calendar invite — no mail integration needed.
+- **Pipecat is the orchestration boundary.** The backend builds a Pipecat pipeline around `GeminiLiveLLMService` so text/audio filters and custom middleware can be inserted cleanly.
+- **Visitor phone number is optional.** The agent asks whether the visitor wants to provide one, captures it in chunks, and confirms it with grouped readback.
+- **Readiness is visible before voice starts.** The UI must show whether the voice API is usable and whether Google Calendar is connected; missing dependencies produce an outage message.
 - **Reschedule by time match, not title.** `find_meeting_at` identifies events by approximate datetime — never by title (which is private).
 - **moss is post-MVP.** The freebusy API makes semantic calendar indexing irrelevant for the core use case.
 

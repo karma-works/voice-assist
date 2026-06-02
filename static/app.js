@@ -26,10 +26,22 @@ let playCtx = null;
 let nextPlayTime = 0;
 let audioQueue = [];
 let isPlaying = false;
+let activeSources = new Set();
+let assistantAudioActive = false;
+let assistantAudioStartedAt = 0;
+let lastInterruptAt = 0;
 
 // Debug
 let totalBytesReceived = 0;
 let framesSent = 0;
+let interruptCount = 0;
+
+// Interruption detection
+const INTERRUPT_RMS_THRESHOLD = 0.025;
+const INTERRUPT_MIN_SPEECH_FRAMES = 2;
+const INTERRUPT_GRACE_MS = 450;
+const INTERRUPT_COOLDOWN_MS = 900;
+let speechFramesWhileAssistant = 0;
 
 // ─── UI helpers ────────────────────────────────────────────────────────────
 
@@ -102,6 +114,8 @@ async function ensurePlayCtx() {
 }
 
 async function enqueueAudio(uint8) {
+  assistantAudioActive = true;
+  if (!assistantAudioStartedAt) assistantAudioStartedAt = performance.now();
   audioQueue.push(uint8);
   if (!isPlaying) drainAudioQueue();
 }
@@ -123,12 +137,16 @@ async function drainAudioQueue() {
     const src = ctx.createBufferSource();
     src.buffer = buf;
     src.connect(ctx.destination);
+    activeSources.add(src);
 
     const now = ctx.currentTime;
     const start = Math.max(now + 0.005, nextPlayTime);
     nextPlayTime = start + buf.duration;
     src.start(start);
-    src.onended = drainAudioQueue;
+    src.onended = () => {
+      activeSources.delete(src);
+      drainAudioQueue();
+    };
   } catch(e) {
     dbg('Playback err: ' + e.message);
     isPlaying = false;
@@ -138,8 +156,53 @@ async function drainAudioQueue() {
 
 function clearAudio() {
   audioQueue = [];
+  for (const src of activeSources) {
+    try { src.stop(); } catch {}
+  }
+  activeSources.clear();
   isPlaying = false;
   nextPlayTime = 0;
+  assistantAudioActive = false;
+  assistantAudioStartedAt = 0;
+  speechFramesWhileAssistant = 0;
+}
+
+function sendJson(msg) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  ws.send(JSON.stringify(msg));
+  return true;
+}
+
+function handleDetectedInterruption(rms) {
+  const now = performance.now();
+  if (!assistantAudioActive) return;
+  if (now - assistantAudioStartedAt < INTERRUPT_GRACE_MS) return;
+  if (now - lastInterruptAt < INTERRUPT_COOLDOWN_MS) return;
+
+  lastInterruptAt = now;
+  interruptCount++;
+  clearAudio();
+  stopWave();
+  setStatus('Listening — go ahead', 'listening');
+  sendJson({ type: 'interrupt', at: Date.now(), rms });
+  dbg(`Interrupt ${interruptCount}: rms=${rms.toFixed(4)}`);
+}
+
+function handleMicLevel(rms) {
+  if (!assistantAudioActive) {
+    speechFramesWhileAssistant = 0;
+    return;
+  }
+
+  if (rms >= INTERRUPT_RMS_THRESHOLD) {
+    speechFramesWhileAssistant++;
+  } else {
+    speechFramesWhileAssistant = Math.max(0, speechFramesWhileAssistant - 1);
+  }
+
+  if (speechFramesWhileAssistant >= INTERRUPT_MIN_SPEECH_FRAMES) {
+    handleDetectedInterruption(rms);
+  }
 }
 
 // ─── Audio capture (AudioWorklet, always-on) ─────────────────────────────
@@ -167,9 +230,14 @@ class CaptureProcessor extends AudioWorkletProcessor {
     // Post every ~1600 samples = 100ms at 16kHz
     if (this._buf.length >= 1600) {
       const out = new Int16Array(this._buf.length);
-      for (let i = 0; i < this._buf.length; i++)
-        out[i] = this._buf[i] * 32767 | 0;
-      this.port.postMessage(out.buffer, [out.buffer]);
+      let sumSquares = 0;
+      for (let i = 0; i < this._buf.length; i++) {
+        const sample = this._buf[i];
+        out[i] = sample * 32767 | 0;
+        sumSquares += sample * sample;
+      }
+      const rms = Math.sqrt(sumSquares / this._buf.length);
+      this.port.postMessage({ type: 'audio', buffer: out.buffer, rms }, [out.buffer]);
       this._buf = [];
     }
     return true;
@@ -195,11 +263,13 @@ async function startCapture() {
     const source = captureCtx.createMediaStreamSource(micStream);
     workletNode = new AudioWorkletNode(captureCtx, 'capture-processor');
     workletNode.port.onmessage = (e) => {
+      if (!e.data || e.data.type !== 'audio') return;
+      handleMicLevel(e.data.rms || 0);
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      ws.send(e.data);  // ArrayBuffer of Int16 PCM at 16kHz
+      ws.send(e.data.buffer);  // ArrayBuffer of Int16 PCM at 16kHz
       framesSent++;
       if (framesSent <= 3 || framesSent % 30 === 0)
-        dbg(`Mic frame ${framesSent}: ${e.data.byteLength}b`);
+        dbg(`Mic frame ${framesSent}: ${e.data.buffer.byteLength}b rms=${(e.data.rms || 0).toFixed(4)}`);
     };
     source.connect(workletNode);
     // Don't connect workletNode to destination — no mic playback
@@ -258,7 +328,14 @@ function connect() {
         const msg = JSON.parse(event.data);
         if (msg.type === 'error' && msg.code === 4001) { showError(); ws.close(); return; }
         if (msg.type === 'transcript') addTranscript(msg.role, msg.text);
+        if (msg.type === 'interrupted') {
+          clearAudio();
+          setStatus('Listening — go ahead', 'listening');
+        }
         if (msg.type === 'turn_complete') {
+          assistantAudioActive = false;
+          assistantAudioStartedAt = 0;
+          speechFramesWhileAssistant = 0;
           setStatus('Listening — just speak', 'listening');
           stopWave();
         }
