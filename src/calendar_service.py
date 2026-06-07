@@ -1,12 +1,14 @@
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import pytz
 import google.auth
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
 
 from src.config import BUFFER_MINUTES, GOOGLE_CALENDAR_ID as CALENDAR_ID
 
@@ -16,51 +18,49 @@ BERLIN_TZ = pytz.timezone("Europe/Berlin")
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 _service = None
-_calendar_subscribed = False
 
 
 def _get_service():
-    global _service
-    if _service is None:
-        creds, _ = google.auth.default(scopes=SCOPES)
-        _service = build("calendar", "v3", credentials=creds, cache_discovery=False)
-    return _service
+    """Return an authenticated Calendar API client.
 
-
-def _ensure_calendar_subscribed():
-    """Subscribe the service account to the target calendar if not already in its list.
-
-    Service accounts don't auto-accept calendar sharing invites. Without an
-    explicit calendarList.insert() the service account can't find the calendar
-    and events.insert() returns 404 even when write access has been granted.
+    Prefers OAuth2 user credentials (refresh token + client id/secret from env)
+    so the service acts as the calendar owner.  Falls back to Application Default
+    Credentials (service account) when the OAuth vars are absent — useful for
+    local development or read-only freebusy queries, but cannot write to a
+    personal Gmail calendar.
     """
-    global _calendar_subscribed
-    if _calendar_subscribed:
-        return
-    svc = _get_service()
-    try:
-        svc.calendarList().get(calendarId=CALENDAR_ID).execute()
-        logger.info("Calendar %s already in service account list.", CALENDAR_ID)
-        _calendar_subscribed = True
-    except HttpError as e:
-        if e.resp.status == 404:
-            logger.info(
-                "Calendar %s not yet in service account list — subscribing.", CALENDAR_ID
-            )
-            svc.calendarList().insert(body={"id": CALENDAR_ID}).execute()
-            logger.info("Successfully subscribed to calendar %s.", CALENDAR_ID)
-            _calendar_subscribed = True
-        else:
-            logger.error(
-                "Could not subscribe to calendar %s: %s (status %s)",
-                CALENDAR_ID, e, e.resp.status,
-            )
-            raise
+    global _service
+    if _service is not None:
+        return _service
+
+    refresh_token = os.environ.get("GOOGLE_CALENDAR_REFRESH_TOKEN", "")
+    client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "")
+    client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "")
+
+    if refresh_token and client_id and client_secret:
+        logger.info("Calendar: using OAuth2 user credentials.")
+        creds = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=SCOPES,
+        )
+        creds.refresh(Request())
+    else:
+        logger.warning(
+            "Calendar: OAuth2 vars missing — falling back to Application Default Credentials. "
+            "Event creation will fail on personal Gmail calendars."
+        )
+        creds, _ = google.auth.default(scopes=SCOPES)
+
+    _service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+    return _service
 
 
 async def get_calendar_ids() -> list[str]:
     def _fetch():
-        _ensure_calendar_subscribed()
         svc = _get_service()
         result = svc.calendarList().list().execute()
         ids = [item["id"] for item in result.get("items", [])]
@@ -99,7 +99,7 @@ async def readiness_check() -> dict:
     try:
         calendar_ids = await get_calendar_ids()
         if not calendar_ids:
-            return {"ready": False, "message": "No calendars are visible to the service account."}
+            return {"ready": False, "message": "No calendars visible."}
 
         def _freebusy_probe():
             svc = _get_service()
@@ -201,7 +201,6 @@ async def create_event(
     meeting_type: Optional[str] = None,
 ) -> dict:
     def _create():
-        _ensure_calendar_subscribed()
         svc = _get_service()
         description_lines = [
             f"Meeting topic: {topic}",
