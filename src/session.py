@@ -22,6 +22,12 @@ from src.observability import TraceLogger
 
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
 
+PROACTIVE_GREETING_PROMPT = (
+    "The visitor has opened the voice scheduling session. "
+    "Greet them now in German and ask briefly what the meeting with Christian is about. "
+    "Do not wait for the visitor to speak first."
+)
+
 PIPECAT_TOOLS = [
     {
         "function_declarations": [
@@ -174,6 +180,17 @@ PHONE CONFIRMATION (German example): "Ich habe plus vier neun, eins sieben eins,
 If phone confirmation fails twice, say you can continue without a phone number and finish the booking.
 
 PRIVACY: If asked about other calendar entries: "Ich sehe nur die Verfügbarkeit, keine Termindetails." """
+
+
+def build_initial_context():
+    from pipecat.processors.aggregators.llm_context import LLMContext
+
+    return LLMContext(messages=[
+        {
+            "role": "user",
+            "content": PROACTIVE_GREETING_PROMPT,
+        }
+    ])
 
 
 class BrowserWebSocketSerializer:
@@ -331,11 +348,11 @@ class BrowserWebSocketSerializer:
 class InitialContextProcessor:
     """Inject an LLM context once so Gemini Live can execute registered tools."""
 
-    def __init__(self, system_prompt: str, context=None) -> None:
+    def __init__(self, context=None, trace: TraceLogger | None = None) -> None:
         from pipecat.processors.frame_processor import FrameProcessor
-        from pipecat.processors.aggregators.llm_context import LLMContext
 
-        _context = context if context is not None else LLMContext()
+        _context = context if context is not None else build_initial_context()
+        _trace = trace
 
         class _Processor(FrameProcessor):
             async def process_frame(inner_self, frame, direction):
@@ -344,6 +361,8 @@ class InitialContextProcessor:
                 await super(_Processor, inner_self).process_frame(frame, direction)
                 await inner_self.push_frame(frame, direction)
                 if isinstance(frame, StartFrame):
+                    if _trace:
+                        await _trace.event("assistant_proactive_start_requested")
                     await inner_self.push_frame(LLMContextFrame(_context))
 
         self.processor = _Processor(name="initial-context")
@@ -459,13 +478,11 @@ async def run_pipecat_session(websocket, trace: TraceLogger | None = None) -> No
             functools.partial(_handle_pipecat_tool_call, trace=trace, booking_state=booking_state),
         )
 
-    from pipecat.processors.aggregators.llm_context import LLMContext
-
-    shared_context = LLMContext()
+    shared_context = build_initial_context()
     pipeline = Pipeline(
         [
             transport.input(),
-            InitialContextProcessor(build_system_prompt(), shared_context).processor,
+            InitialContextProcessor(shared_context, trace=trace).processor,
             ToolCallAggregator(shared_context).processor,
             llm,
             transport.output(),
@@ -673,4 +690,4 @@ def build_pipecat_pipeline(websocket):
             tool_name,
             functools.partial(_handle_pipecat_tool_call, booking_state=booking_state),
         )
-    return Pipeline([transport.input(), InitialContextProcessor(build_system_prompt()).processor, llm, transport.output()])
+    return Pipeline([transport.input(), InitialContextProcessor().processor, llm, transport.output()])

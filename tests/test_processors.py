@@ -14,7 +14,7 @@ from src.booking_state import BookingSession
 from src import calendar_service
 from src.observability import TraceLogger, hash_token, redact_value
 from src.processors import AudioInputProcessor, InterruptionProcessor, TextOutputProcessor
-from src.session import BrowserWebSocketSerializer, _dispatch_tool
+from src.session import BrowserWebSocketSerializer, _dispatch_tool, build_initial_context
 
 
 class ProcessorTests(unittest.TestCase):
@@ -42,6 +42,14 @@ class ProcessorTests(unittest.TestCase):
 
 
 class BrowserWebSocketSerializerTests(unittest.TestCase):
+    def test_initial_context_contains_proactive_greeting_prompt(self):
+        context = build_initial_context()
+
+        messages = context.get_messages()
+
+        self.assertEqual(messages[0]["role"], "user")
+        self.assertIn("Do not wait", messages[0]["content"])
+
     def test_binary_browser_audio_deserializes_to_pipecat_audio_frame(self):
         async def run():
             serializer = BrowserWebSocketSerializer().serializer
