@@ -347,20 +347,69 @@ class BrowserWebSocketSerializer:
 class InitialContextProcessor:
     """Inject an LLM context once so Gemini Live can execute registered tools."""
 
-    def __init__(self, system_prompt: str) -> None:
+    def __init__(self, system_prompt: str, context=None) -> None:
         from pipecat.processors.frame_processor import FrameProcessor
+        from pipecat.processors.aggregators.llm_context import LLMContext
+
+        _context = context if context is not None else LLMContext()
 
         class _Processor(FrameProcessor):
             async def process_frame(inner_self, frame, direction):
                 from pipecat.frames.frames import LLMContextFrame, StartFrame
-                from pipecat.processors.aggregators.llm_context import LLMContext
 
                 await super(_Processor, inner_self).process_frame(frame, direction)
                 await inner_self.push_frame(frame, direction)
                 if isinstance(frame, StartFrame):
-                    await inner_self.push_frame(LLMContextFrame(LLMContext()))
+                    await inner_self.push_frame(LLMContextFrame(_context))
 
         self.processor = _Processor(name="initial-context")
+
+
+class ToolCallAggregator:
+    """Forward tool call results back to Gemini Live via the shared LLM context.
+
+    Pipecat's Gemini Live service sends tool results through
+    _process_completed_function_calls, which only runs when a new
+    LLMContextFrame arrives with the result already in the context.
+    Without a full context aggregator pair in the pipeline the
+    FunctionCallResultFrame broadcast by llm_service never updates
+    the context, so send_tool_response is never called and the model
+    waits silently.  This minimal processor sits upstream of the LLM,
+    catches the upstream-propagating FunctionCallResultFrame, writes
+    the result into the shared context, and pushes a fresh
+    LLMContextFrame downstream so the LLM service triggers
+    send_tool_response.
+    """
+
+    def __init__(self, context) -> None:
+        import json as _json
+        from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
+
+        _context = context
+
+        class _Proc(FrameProcessor):
+            async def process_frame(inner_self, frame, direction):
+                from pipecat.frames.frames import (
+                    FunctionCallResultFrame,
+                    LLMContextFrame,
+                )
+
+                await super().process_frame(frame, direction)
+
+                if isinstance(frame, FunctionCallResultFrame) and frame.result is not None:
+                    result_content = _json.dumps(frame.result, ensure_ascii=False)
+                    _context.add_message({
+                        "role": "tool",
+                        "tool_call_id": frame.tool_call_id,
+                        "content": result_content,
+                    })
+                    await inner_self.push_frame(
+                        LLMContextFrame(_context), FrameDirection.DOWNSTREAM
+                    )
+
+                await inner_self.push_frame(frame, direction)
+
+        self.processor = _Proc(name="tool-call-aggregator")
 
 
 async def run_session(websocket) -> None:
@@ -420,10 +469,14 @@ async def run_pipecat_session(websocket) -> None:
     ):
         llm.register_function(tool_name, _handle_pipecat_tool_call)
 
+    from pipecat.processors.aggregators.llm_context import LLMContext
+
+    shared_context = LLMContext()
     pipeline = Pipeline(
         [
             transport.input(),
-            InitialContextProcessor(build_system_prompt()).processor,
+            InitialContextProcessor(build_system_prompt(), shared_context).processor,
+            ToolCallAggregator(shared_context).processor,
             llm,
             transport.output(),
         ]
