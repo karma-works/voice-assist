@@ -7,7 +7,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.cloud import secretmanager
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
-PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "gaphunter-496315")
+PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "")
 SECRET_NAME = "GOOGLE_CALENDAR_REFRESH_TOKEN"
 
 CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
@@ -15,6 +15,9 @@ CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
 
 if not CLIENT_ID or not CLIENT_SECRET:
     print("Set GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET env vars first.", file=sys.stderr)
+    sys.exit(1)
+if not PROJECT_ID:
+    print("Set GCP_PROJECT_ID first.", file=sys.stderr)
     sys.exit(1)
 
 client_config = {
@@ -30,7 +33,7 @@ client_config = {
 flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
 creds = flow.run_local_server(port=0)
 
-print(f"\nRefresh token obtained: {creds.refresh_token[:20]}...")
+print("\nRefresh token obtained.")
 
 # Store in Secret Manager
 sm_client = secretmanager.SecretManagerServiceClient()
@@ -57,4 +60,4 @@ except Exception:
         print(f"Created secret: {version.name}")
     except Exception as e:
         print(f"Secret Manager error: {e}")
-        print(f"Refresh token (save manually): {creds.refresh_token}")
+        print("Refresh token was not printed. Re-run after fixing Secret Manager access.")

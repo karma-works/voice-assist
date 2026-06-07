@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       label:
-        description: 'Reference note (e.g. "Meeting with Max M.")'
+        description: 'Non-sensitive reference note. Do not include names, emails, or private details.'
         required: false
         default: ''
 
@@ -36,4 +36,5 @@ jobs:
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
           APP_BASE_URL: ${{ secrets.APP_BASE_URL }}
           INPUT_LABEL: ${{ github.event.inputs.label }}
+          PRINT_INVITE_URL: "false"
         run: python scripts/generate_invite.py

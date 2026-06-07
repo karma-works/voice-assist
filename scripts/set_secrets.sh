@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Set all required GitHub Secrets for the voice-assist repo.
-# Run: GEMINI_API_KEY=xxx GOOGLE_OAUTH_CLIENT_ID=xxx ... ./scripts/set_secrets.sh
+# Run: GCP_PROJECT_ID=xxx GOOGLE_CALENDAR_ID=primary GOOGLE_OAUTH_CLIENT_ID=xxx ... ./scripts/set_secrets.sh
 set -euo pipefail
 
 REPO="karma-works/voice-assist"
-PROJECT_ID="${GCP_PROJECT_ID:-gaphunter-496315}"
+PROJECT_ID="${GCP_PROJECT_ID:-}"
 REGION="${GCP_REGION:-europe-west6}"
 WIF_PROVIDER="${GCP_WORKLOAD_IDENTITY_PROVIDER:-}"
 DEPLOY_SA="${GCP_SERVICE_ACCOUNT:-voice-assist-deploy@${PROJECT_ID}.iam.gserviceaccount.com}"
@@ -12,7 +12,7 @@ DEPLOY_SA="${GCP_SERVICE_ACCOUNT:-voice-assist-deploy@${PROJECT_ID}.iam.gservice
 echo "Setting GitHub Secrets for $REPO..."
 
 # Required env vars check
-required=(GEMINI_API_KEY GOOGLE_OAUTH_CLIENT_ID GOOGLE_OAUTH_CLIENT_SECRET)
+required=(GCP_PROJECT_ID GOOGLE_CALENDAR_ID GOOGLE_OAUTH_CLIENT_ID GOOGLE_OAUTH_CLIENT_SECRET)
 for var in "${required[@]}"; do
   if [ -z "${!var:-}" ]; then
     echo "ERROR: $var is not set" >&2
@@ -38,7 +38,7 @@ gh secret set GCP_PROJECT_ID --repo "$REPO" --body "$PROJECT_ID"
 gh secret set GCP_REGION --repo "$REPO" --body "$REGION"
 gh secret set GCP_WORKLOAD_IDENTITY_PROVIDER --repo "$REPO" --body "$WIF_PROVIDER"
 gh secret set GCP_SERVICE_ACCOUNT --repo "$REPO" --body "$DEPLOY_SA"
-gh secret set GEMINI_API_KEY --repo "$REPO" --body "$GEMINI_API_KEY"
+gh secret set GOOGLE_CALENDAR_ID --repo "$REPO" --body "$GOOGLE_CALENDAR_ID"
 gh secret set GOOGLE_OAUTH_CLIENT_ID --repo "$REPO" --body "$GOOGLE_OAUTH_CLIENT_ID"
 gh secret set GOOGLE_OAUTH_CLIENT_SECRET --repo "$REPO" --body "$GOOGLE_OAUTH_CLIENT_SECRET"
 
