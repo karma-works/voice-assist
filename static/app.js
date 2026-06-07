@@ -3,6 +3,7 @@
 // Gemini Live expects 16kHz PCM16 mono input, outputs 24kHz PCM16 mono
 const INPUT_SAMPLE_RATE = 16000;
 const OUTPUT_SAMPLE_RATE = 24000;
+const INPUT_CHUNK_SAMPLES = 480; // 30 ms at 16 kHz; Gemini Live recommends 20-40 ms chunks.
 
 const statusEl = document.getElementById('status');
 const micBtn = document.getElementById('mic-btn');
@@ -17,18 +18,21 @@ const outageEl = document.getElementById('outage');
 let ws = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECTS = 5;
+let traceSessionId = null;
 
 // Audio capture (always-on)
 let captureCtx = null;
 let workletNode = null;
 let micStream = null;
 let capturing = false;
+let keepAliveGain = null;
 
 // Audio playback
 let playCtx = null;
 let nextPlayTime = 0;
 let audioQueue = [];
 let isPlaying = false;
+let schedulingAudio = false;
 let activeSources = new Set();
 let assistantAudioActive = false;
 let assistantAudioStartedAt = 0;
@@ -150,7 +154,7 @@ function stopWave() {
 
 async function ensurePlayCtx() {
   if (!playCtx) {
-    playCtx = new AudioContext({ sampleRate: OUTPUT_SAMPLE_RATE });
+    playCtx = new AudioContext();
   }
   if (playCtx.state === 'suspended') await playCtx.resume();
   return playCtx;
@@ -160,40 +164,53 @@ async function enqueueAudio(uint8) {
   assistantAudioActive = true;
   if (!assistantAudioStartedAt) assistantAudioStartedAt = performance.now();
   audioQueue.push(uint8);
-  if (!isPlaying) drainAudioQueue();
+  await scheduleAudioQueue();
 }
 
-async function drainAudioQueue() {
-  if (!audioQueue.length) { isPlaying = false; return; }
-  isPlaying = true;
-  const chunk = audioQueue.shift();
+async function scheduleAudioQueue() {
+  if (schedulingAudio) return;
+  schedulingAudio = true;
   try {
     const ctx = await ensurePlayCtx();
-    // chunk is Uint8Array of raw PCM16 LE mono at OUTPUT_SAMPLE_RATE
-    const i16 = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.byteLength >>> 1);
-    const f32 = new Float32Array(i16.length);
-    for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+    if (nextPlayTime < ctx.currentTime) {
+      if (nextPlayTime > 0 && ctx.currentTime - nextPlayTime > 0.04) {
+        traceClient('playback_underrun', { gapMs: Math.round((ctx.currentTime - nextPlayTime) * 1000) });
+      }
+      nextPlayTime = ctx.currentTime + 0.02;
+    }
 
-    const buf = ctx.createBuffer(1, f32.length, OUTPUT_SAMPLE_RATE);
-    buf.copyToChannel(f32, 0);
+    while (audioQueue.length) {
+      const chunk = audioQueue.shift();
+      // chunk is Uint8Array of raw PCM16 LE mono at OUTPUT_SAMPLE_RATE
+      const i16 = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.byteLength >>> 1);
+      const f32 = new Float32Array(i16.length);
+      for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
 
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    src.connect(ctx.destination);
-    activeSources.add(src);
+      const buf = ctx.createBuffer(1, f32.length, OUTPUT_SAMPLE_RATE);
+      buf.copyToChannel(f32, 0);
 
-    const now = ctx.currentTime;
-    const start = Math.max(now + 0.005, nextPlayTime);
-    nextPlayTime = start + buf.duration;
-    src.start(start);
-    src.onended = () => {
-      activeSources.delete(src);
-      drainAudioQueue();
-    };
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      activeSources.add(src);
+
+      const start = Math.max(ctx.currentTime + 0.005, nextPlayTime);
+      nextPlayTime = start + buf.duration;
+      isPlaying = true;
+      src.start(start);
+      src.onended = () => {
+        activeSources.delete(src);
+        if (!activeSources.size && !audioQueue.length) {
+          isPlaying = false;
+          nextPlayTime = 0;
+        }
+      };
+    }
   } catch(e) {
     dbg('Playback err: ' + e.message);
     isPlaying = false;
-    drainAudioQueue();
+  } finally {
+    schedulingAudio = false;
   }
 }
 
@@ -216,6 +233,10 @@ function sendJson(msg) {
   return true;
 }
 
+function traceClient(event, metadata = {}) {
+  sendJson({ type: 'trace', event, metadata });
+}
+
 function handleDetectedInterruption(rms) {
   const now = performance.now();
   if (!assistantAudioActive) return;
@@ -228,6 +249,7 @@ function handleDetectedInterruption(rms) {
   stopWave();
   setStatus('Listening — go ahead', 'listening');
   sendJson({ type: 'interrupt', at: Date.now(), rms });
+  traceClient('interrupt_detected', { rms, interruptCount });
   dbg(`Interrupt ${interruptCount}: rms=${rms.toFixed(4)}`);
 }
 
@@ -251,13 +273,16 @@ function handleMicLevel(rms) {
 // ─── Audio capture (AudioWorklet, always-on) ─────────────────────────────
 
 // Inline AudioWorklet processor — captures 128-sample frames, downsamples
-// from device rate to 16kHz, accumulates into ~100ms chunks and posts to main.
+// from device rate to 16kHz, accumulates into 30ms chunks and posts to main.
 const WORKLET_CODE = `
+const TARGET_SAMPLE_RATE = ${INPUT_SAMPLE_RATE};
+const CHUNK_SAMPLES = ${INPUT_CHUNK_SAMPLES};
+
 class CaptureProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this._buf = [];
-    this._ratio = sampleRate / 16000;
+    this._ratio = sampleRate / TARGET_SAMPLE_RATE;
     this._acc = 0;
   }
   process(inputs) {
@@ -270,8 +295,8 @@ class CaptureProcessor extends AudioWorkletProcessor {
         this._buf.push(Math.max(-1, Math.min(1, ch[i])));
       }
     }
-    // Post every ~1600 samples = 100ms at 16kHz
-    if (this._buf.length >= 1600) {
+    // Post every 30ms. Larger buffers add avoidable first-audio latency.
+    if (this._buf.length >= CHUNK_SAMPLES) {
       const out = new Int16Array(this._buf.length);
       let sumSquares = 0;
       for (let i = 0; i < this._buf.length; i++) {
@@ -305,6 +330,10 @@ async function startCapture() {
 
     captureCtx = new AudioContext();  // use device's native rate
     dbg('AudioContext rate=' + captureCtx.sampleRate + 'Hz');
+    traceClient('mic_started', {
+      deviceSampleRate: micStream.getAudioTracks()[0]?.getSettings().sampleRate || null,
+      audioContextSampleRate: captureCtx.sampleRate,
+    });
 
     const blob = new Blob([WORKLET_CODE], { type: 'application/javascript' });
     const url = URL.createObjectURL(blob);
@@ -319,12 +348,16 @@ async function startCapture() {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       ws.send(e.data.buffer);  // ArrayBuffer of Int16 PCM at 16kHz
       framesSent++;
+      if (framesSent === 1) traceClient('first_mic_frame', { bytes: e.data.buffer.byteLength, rms: e.data.rms || 0 });
+      if (framesSent % 100 === 0) traceClient('mic_frame_summary', { framesSent, rms: e.data.rms || 0 });
       if (framesSent <= 3 || framesSent % 30 === 0)
         dbg(`Mic frame ${framesSent}: ${e.data.buffer.byteLength}b rms=${(e.data.rms || 0).toFixed(4)}`);
     };
     source.connect(workletNode);
-    // Don't connect workletNode to destination — no mic playback
-    workletNode.connect(captureCtx.createGain()); // keep graph active
+    // Keep the graph active without playing microphone audio.
+    keepAliveGain = captureCtx.createGain();
+    keepAliveGain.gain.value = 0;
+    workletNode.connect(keepAliveGain).connect(captureCtx.destination);
 
     capturing = true;
     dbg('Capture started');
@@ -332,6 +365,7 @@ async function startCapture() {
     startWave(false);
   } catch(e) {
     dbg('Mic error: ' + e.message);
+    traceClient('mic_error', { message: e.message });
     setStatus('Microphone error: ' + e.message, 'error');
   }
 }
@@ -340,9 +374,11 @@ function stopCapture() {
   if (!capturing) return;
   capturing = false;
   if (workletNode) { workletNode.disconnect(); workletNode = null; }
+  if (keepAliveGain) { keepAliveGain.disconnect(); keepAliveGain = null; }
   if (captureCtx) { captureCtx.close(); captureCtx = null; }
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
   dbg('Capture stopped');
+  traceClient('mic_stopped', { framesSent });
 }
 
 // ─── WebSocket ──────────────────────────────────────────────────────────────
@@ -378,6 +414,10 @@ function connect() {
       try {
         const msg = JSON.parse(event.data);
         if (msg.type === 'error' && msg.code === 4001) { showError(); ws.close(); return; }
+        if (msg.type === 'trace_session') {
+          traceSessionId = msg.session_id;
+          dbg('Trace session: ' + traceSessionId);
+        }
         if (msg.type === 'transcript') addTranscript(msg.role, msg.text);
         if (msg.type === 'interrupted') {
           clearAudio();

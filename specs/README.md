@@ -28,6 +28,7 @@ A voice-based meeting scheduler. External visitors receive an invite link, open 
 | [implementation-plan.md](implementation-plan.md) | Week-by-week 7-week Phase 0 + Phase 1/2 outlines |
 | [interview-next-level-2026-06-02.md](interview-next-level-2026-06-02.md) | Interview notes and resulting next-level decisions |
 | [next-level-implementation-plan.md](next-level-implementation-plan.md) | Migration plan for Pipecat, middleware, voice best practices, and phone-number flow |
+| [excellent-voice-agent-plan.md](excellent-voice-agent-plan.md) | Execution plan for a production-quality voice scheduling agent: observability, deterministic booking, latency, audio, evaluation, and hardening |
 
 ## Key Decisions (one line each)
 

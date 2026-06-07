@@ -141,7 +141,9 @@ async def get_available_slots(
             if hour < 7:
                 current = current.replace(hour=7, minute=0, second=0, microsecond=0)
                 continue
-            if hour + duration_minutes / 60 > 15:
+            # 15:00 is a valid start time. The business window constrains
+            # offered start times, not necessarily the meeting end.
+            if hour > 15:
                 current = _next_window_start(current, slot_type)
                 continue
         else:
@@ -157,14 +159,15 @@ async def get_available_slots(
             if slot_start < be + buf and slot_end > bs - buf:
                 conflict = True
                 current = (be + buf).astimezone(BERLIN_TZ)
-                current = _round_up_to_quarter(current)
+                current = _round_up_to_half_hour(current)
                 break
 
         if not conflict:
             berlin_start = slot_start.astimezone(BERLIN_TZ)
+            berlin_end = slot_end.astimezone(BERLIN_TZ)
             slots.append({
-                "start": slot_start.isoformat(),
-                "end": slot_end.isoformat(),
+                "start": berlin_start.isoformat(),
+                "end": berlin_end.isoformat(),
                 "display": berlin_start.strftime("%A, %B %d at %H:%M (Berlin time)"),
             })
             current += timedelta(minutes=30)
@@ -172,11 +175,11 @@ async def get_available_slots(
     return slots
 
 
-def _round_up_to_quarter(dt: datetime) -> datetime:
-    r = dt.minute % 15
+def _round_up_to_half_hour(dt: datetime) -> datetime:
+    r = dt.minute % 30
     if r == 0:
         return dt.replace(second=0, microsecond=0)
-    return dt.replace(minute=dt.minute + (15 - r), second=0, microsecond=0)
+    return dt.replace(second=0, microsecond=0) + timedelta(minutes=30 - r)
 
 
 def _next_window_start(current: datetime, slot_type: str) -> datetime:
@@ -188,6 +191,22 @@ def _next_window_start(current: datetime, slot_type: str) -> datetime:
         return nxt
     else:
         return berlin.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+
+
+def _as_berlin_datetime(value: str) -> datetime:
+    """Normalize model-provided appointment times to Berlin-local ISO strings.
+
+    Visitors are assumed local to Christian's timezone. The model may attach
+    an offset even when the user only said a local wall-clock time; preserve
+    the wall-clock fields and apply Europe/Berlin.
+    """
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    local_wall_time = dt.replace(tzinfo=None)
+    return BERLIN_TZ.localize(local_wall_time)
+
+
+def _as_berlin_iso(value: str) -> str:
+    return _as_berlin_datetime(value).isoformat()
 
 
 async def create_event(
@@ -213,13 +232,21 @@ async def create_event(
         event = {
             "summary": title,
             "description": "\n".join(description_lines),
-            "start": {"dateTime": start_iso, "timeZone": "Europe/Berlin"},
-            "end": {"dateTime": end_iso, "timeZone": "Europe/Berlin"},
+            "start": {"dateTime": _as_berlin_iso(start_iso), "timeZone": "Europe/Berlin"},
+            "end": {"dateTime": _as_berlin_iso(end_iso), "timeZone": "Europe/Berlin"},
         }
-        return svc.events().insert(calendarId=CALENDAR_ID, body=event, sendUpdates="none").execute()
+        result = svc.events().insert(calendarId=CALENDAR_ID, body=event, sendUpdates="none").execute()
+        verified = svc.events().get(calendarId=CALENDAR_ID, eventId=result["id"]).execute()
+        return result, verified
 
-    result = await asyncio.get_event_loop().run_in_executor(None, _create)
-    return {"event_id": result["id"], "html_link": result.get("htmlLink", "")}
+    result, verified = await asyncio.get_event_loop().run_in_executor(None, _create)
+    return {
+        "success": True,
+        "event_id": result["id"],
+        "html_link": result.get("htmlLink", ""),
+        "calendar_id": CALENDAR_ID,
+        "verified_start": verified.get("start", {}).get("dateTime", ""),
+    }
 
 
 async def find_meeting_at(
@@ -229,7 +256,7 @@ async def find_meeting_at(
 ) -> dict:
     def _find():
         svc = _get_service()
-        target = datetime.fromisoformat(approx_datetime_iso.replace("Z", "+00:00"))
+        target = _as_berlin_datetime(approx_datetime_iso)
         tmin = (target - timedelta(minutes=tolerance_minutes)).isoformat()
         tmax = (target + timedelta(minutes=tolerance_minutes)).isoformat()
         result = svc.events().list(
@@ -265,8 +292,8 @@ async def reschedule_meeting(event_id: str, new_start_iso: str, new_end_iso: str
     def _update():
         svc = _get_service()
         patch = {
-            "start": {"dateTime": new_start_iso, "timeZone": "Europe/Berlin"},
-            "end": {"dateTime": new_end_iso, "timeZone": "Europe/Berlin"},
+            "start": {"dateTime": _as_berlin_iso(new_start_iso), "timeZone": "Europe/Berlin"},
+            "end": {"dateTime": _as_berlin_iso(new_end_iso), "timeZone": "Europe/Berlin"},
         }
         result = svc.events().patch(
             calendarId=CALENDAR_ID, eventId=event_id, body=patch, sendUpdates="all"

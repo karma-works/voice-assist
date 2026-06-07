@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import functools
 import json
 import traceback
 from datetime import datetime
@@ -12,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 from src.config import GCP_PROJECT_ID, GCP_LOCATION, GEMINI_MODEL, BUFFER_MINUTES
 from src import calendar_service
+from src.booking_state import BookingSession
 from src.processors import (
     AudioInputProcessor,
     InterruptionProcessor,
@@ -19,6 +21,7 @@ from src.processors import (
     StateProcessor,
     TextOutputProcessor,
 )
+from src.observability import TraceLogger
 
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
 
@@ -48,14 +51,15 @@ TOOLS = [
                 ),
             ),
             types.FunctionDeclaration(
-                name="book_meeting",
-                description="Book a meeting in the calendar. Only call after explicit visitor confirmation of time, visitor name, optional phone status, and topic.",
+                name="prepare_booking",
+                description="Prepare a booking after the visitor chose a slot and provided required details. This does not write to the calendar. Use the returned booking_operation_id when asking for explicit confirmation.",
                 parameters=types.Schema(
                     type=types.Type.OBJECT,
                     properties={
                         "title": types.Schema(type=types.Type.STRING, description="Meeting title"),
-                        "start_iso": types.Schema(type=types.Type.STRING, description="Start datetime ISO 8601 with timezone"),
-                        "end_iso": types.Schema(type=types.Type.STRING, description="End datetime ISO 8601 with timezone"),
+                        "start_iso": types.Schema(type=types.Type.STRING, description="Start datetime as local Europe/Berlin wall-clock ISO 8601 with Berlin offset. Never convert the user's spoken time to UTC."),
+                        "end_iso": types.Schema(type=types.Type.STRING, description="End datetime as local Europe/Berlin wall-clock ISO 8601 with Berlin offset. Never convert the user's spoken time to UTC."),
+                        "selected_slot_id": types.Schema(type=types.Type.STRING, description="Opaque slot_id returned by get_available_slots, when the visitor selected one of the offered options."),
                         "visitor_name": types.Schema(type=types.Type.STRING),
                         "visitor_phone": types.Schema(type=types.Type.STRING, description="Optional confirmed visitor phone number. Omit when declined or unconfirmed."),
                         "visitor_phone_confirmed": types.Schema(type=types.Type.BOOLEAN, description="True only after explicit grouped readback confirmation."),
@@ -64,6 +68,18 @@ TOOLS = [
                         "topic": types.Schema(type=types.Type.STRING, description="Meeting topic/purpose"),
                     },
                     required=["title", "start_iso", "end_iso", "visitor_name", "topic"],
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="book_meeting",
+                description="Write a previously prepared booking to the calendar. Only call after prepare_booking returned a booking_operation_id and the visitor explicitly confirmed all details.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "booking_operation_id": types.Schema(type=types.Type.STRING, description="booking_operation_id returned by prepare_booking"),
+                        "explicit_confirmation": types.Schema(type=types.Type.BOOLEAN, description="True only when the visitor explicitly confirmed the exact prepared details."),
+                    },
+                    required=["booking_operation_id", "explicit_confirmation"],
                 ),
             ),
             types.FunctionDeclaration(
@@ -91,8 +107,8 @@ TOOLS = [
                     type=types.Type.OBJECT,
                     properties={
                         "event_id": types.Schema(type=types.Type.STRING),
-                        "new_start_iso": types.Schema(type=types.Type.STRING),
-                        "new_end_iso": types.Schema(type=types.Type.STRING),
+                        "new_start_iso": types.Schema(type=types.Type.STRING, description="New start as local Europe/Berlin wall-clock ISO 8601. Never convert the user's spoken time to UTC."),
+                        "new_end_iso": types.Schema(type=types.Type.STRING, description="New end as local Europe/Berlin wall-clock ISO 8601. Never convert the user's spoken time to UTC."),
                     },
                     required=["event_id", "new_start_iso", "new_end_iso"],
                 ),
@@ -128,14 +144,15 @@ PIPECAT_TOOLS = [
                 },
             },
             {
-                "name": "book_meeting",
-                "description": "Book a meeting in the calendar. Only call after explicit visitor confirmation of time, visitor name, optional phone status, and topic.",
+                "name": "prepare_booking",
+                "description": "Prepare a booking after the visitor chose a slot and provided required details. This does not write to the calendar. Use the returned booking_operation_id when asking for explicit confirmation.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "title": {"type": "string"},
-                        "start_iso": {"type": "string"},
-                        "end_iso": {"type": "string"},
+                        "start_iso": {"type": "string", "description": "Start datetime as local Europe/Berlin wall-clock ISO 8601 with Berlin offset. Never convert the user's spoken time to UTC."},
+                        "end_iso": {"type": "string", "description": "End datetime as local Europe/Berlin wall-clock ISO 8601 with Berlin offset. Never convert the user's spoken time to UTC."},
+                        "selected_slot_id": {"type": "string"},
                         "visitor_name": {"type": "string"},
                         "visitor_phone": {"type": "string"},
                         "visitor_phone_confirmed": {"type": "boolean"},
@@ -144,6 +161,18 @@ PIPECAT_TOOLS = [
                         "topic": {"type": "string"},
                     },
                     "required": ["title", "start_iso", "end_iso", "visitor_name", "topic"],
+                },
+            },
+            {
+                "name": "book_meeting",
+                "description": "Write a previously prepared booking to the calendar. Only call after prepare_booking returned a booking_operation_id and the visitor explicitly confirmed all details.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "booking_operation_id": {"type": "string"},
+                        "explicit_confirmation": {"type": "boolean"},
+                    },
+                    "required": ["booking_operation_id", "explicit_confirmation"],
                 },
             },
             {
@@ -165,8 +194,8 @@ PIPECAT_TOOLS = [
                     "type": "object",
                     "properties": {
                         "event_id": {"type": "string"},
-                        "new_start_iso": {"type": "string"},
-                        "new_end_iso": {"type": "string"},
+                        "new_start_iso": {"type": "string", "description": "New start as local Europe/Berlin wall-clock ISO 8601. Never convert the user's spoken time to UTC."},
+                        "new_end_iso": {"type": "string", "description": "New end as local Europe/Berlin wall-clock ISO 8601. Never convert the user's spoken time to UTC."},
                     },
                     "required": ["event_id", "new_start_iso", "new_end_iso"],
                 },
@@ -209,6 +238,7 @@ MEETING TYPE RULES (enforced server-side):
 - Business/professional context → slot_type "business": Monday–Friday, 07:00–15:00 Berlin time.
 - Personal/private context → slot_type "private": any day, 00:00–22:00 Berlin time.
 - When ambiguous, default to business.
+- Assume visitors are in Europe/Berlin. Treat spoken appointment times as local Berlin wall-clock times; do not convert them to UTC for booking or rescheduling tool calls.
 
 BOOKING FLOW:
 1. Greet and ask what the meeting is about (to infer type).
@@ -218,8 +248,17 @@ BOOKING FLOW:
 5. If they decline, continue booking without a phone number.
 6. If they provide one, collect it in chunks. Preserve country codes and leading zeros. Re-ask only unclear chunks.
 7. Read the phone number back in grouped chunks and require explicit confirmation before storing it.
-8. Confirm all details, then call book_meeting.
-9. After booking: confirm the booking in this conversation. Do not promise an automatic visitor calendar invite.
+8. Call prepare_booking with the chosen slot, name, optional phone status, meeting type, and topic.
+9. Read back the prepared details and ask for an explicit yes/no confirmation.
+10. Only after the visitor explicitly confirms, call book_meeting with the booking_operation_id from prepare_booking and explicit_confirmation true.
+11. After booking: only say the meeting is booked if book_meeting returns success true and an event_id. If the tool returns an error or success false, say scheduling failed and ask whether to try again. Do not promise an automatic visitor calendar invite.
+
+DETERMINISTIC BOOKING RULES:
+- Never call book_meeting directly from extracted conversation details.
+- Never invent a booking_operation_id. Use only the value returned by prepare_booking.
+- If the visitor changes the date, time, name, phone, meeting type, or topic after prepare_booking, call prepare_booking again and ask for confirmation again.
+- If book_meeting returns idempotent_replay true, say the meeting was already booked successfully; do not imply a second appointment was created.
+- If a tool says confirmation is missing, ask for confirmation instead of claiming success.
 
 RESCHEDULE FLOW:
 1. Ask for approximate date/time of existing meeting.
@@ -244,6 +283,7 @@ class BrowserWebSocketSerializer:
         text_processor: TextOutputProcessor | None = None,
         state_processor: StateProcessor | None = None,
         interruption_processor: InterruptionProcessor | None = None,
+        trace: TraceLogger | None = None,
     ) -> None:
         from pipecat.serializers.base_serializer import FrameSerializer
 
@@ -261,6 +301,10 @@ class BrowserWebSocketSerializer:
         self.text_processor = text_processor or TextOutputProcessor()
         self.state_processor = state_processor
         self.interruption_processor = interruption_processor or InterruptionProcessor()
+        self.trace = trace
+        self._first_audio_in = False
+        self._first_audio_out = False
+        self._audio_in_frames = 0
 
     @property
     def serializer(self):
@@ -276,7 +320,18 @@ class BrowserWebSocketSerializer:
 
         if isinstance(data, bytes):
             if not self.audio_processor.observe_pcm16(data):
+                if self.trace:
+                    await self.trace.event("audio_in_dropped", {"bytes": len(data), "reason": "odd_pcm_payload"})
                 return None
+            self._audio_in_frames += 1
+            if self.trace and not self._first_audio_in:
+                self._first_audio_in = True
+                await self.trace.event("client_first_audio", {"bytes": len(data)})
+            elif self.trace and self._audio_in_frames % 100 == 0:
+                await self.trace.event("client_audio_summary", {
+                    "frames": self._audio_in_frames,
+                    "bytes_received": self.audio_processor.metrics.bytes_received,
+                })
             return InputAudioRawFrame(
                 audio=data,
                 sample_rate=self.input_sample_rate,
@@ -292,7 +347,19 @@ class BrowserWebSocketSerializer:
         if msg_type == "end":
             return EndFrame(reason="client_end")
         if msg_type == "interrupt":
+            if self.trace:
+                await self.trace.event("client_interrupt", {
+                    "rms": message.get("rms"),
+                    "client_at": message.get("at"),
+                })
             return InterruptionFrame()
+        if msg_type == "trace":
+            if self.trace:
+                await self.trace.event(
+                    f"client_{message.get('event', 'trace')}",
+                    message.get("metadata", {}),
+                )
+            return None
         if msg_type == "transcript_hint":
             text = message.get("text", "")
             if self.interruption_processor.classify_text(text) == "interruption":
@@ -315,21 +382,32 @@ class BrowserWebSocketSerializer:
         )
 
         if isinstance(frame, (OutputAudioRawFrame, TTSAudioRawFrame)):
+            if self.trace and not self._first_audio_out:
+                self._first_audio_out = True
+                await self.trace.event("assistant_first_audio", {"bytes": len(frame.audio)})
             return frame.audio
 
         if isinstance(frame, InterruptionFrame):
+            if self.trace:
+                await self.trace.event("server_interrupted")
             return json.dumps({"type": "interrupted"})
 
         if isinstance(frame, TranscriptionFrame) and frame.text:
+            if self.trace:
+                await self.trace.event("user_transcript", {"text": frame.text})
             return json.dumps({"type": "transcript", "role": "user", "text": frame.text})
 
         if isinstance(frame, TTSTextFrame) and frame.text:
             text = self.text_processor.normalize(frame.text)
             if self.state_processor:
                 self.state_processor.record_assistant_playback(text)
+            if self.trace:
+                await self.trace.event("assistant_transcript", {"text": text})
             return json.dumps({"type": "transcript", "role": "assistant", "text": text})
 
         if isinstance(frame, LLMFullResponseEndFrame):
+            if self.trace:
+                await self.trace.event("assistant_turn_complete")
             return json.dumps({"type": "turn_complete"})
 
         if isinstance(frame, (OutputTransportMessageFrame, OutputTransportMessageUrgentFrame)):
@@ -339,6 +417,8 @@ class BrowserWebSocketSerializer:
 
         if isinstance(frame, ErrorFrame):
             message = getattr(frame, "error", None) or getattr(frame, "message", None) or "Session error."
+            if self.trace:
+                await self.trace.event("pipeline_error", {"message": str(message)})
             return json.dumps({"type": "error", "message": str(message)})
 
         return None
@@ -412,11 +492,11 @@ class ToolCallAggregator:
         self.processor = _Proc(name="tool-call-aggregator")
 
 
-async def run_session(websocket) -> None:
-    await run_pipecat_session(websocket)
+async def run_session(websocket, trace: TraceLogger | None = None) -> None:
+    await run_pipecat_session(websocket, trace=trace)
 
 
-async def run_pipecat_session(websocket) -> None:
+async def run_pipecat_session(websocket, trace: TraceLogger | None = None) -> None:
     from pipecat.pipeline.pipeline import Pipeline
     from pipecat.pipeline.worker import PipelineParams, PipelineWorker
     from pipecat.services.google.gemini_live.vertex.llm import GeminiLiveVertexLLMService
@@ -432,6 +512,7 @@ async def run_pipecat_session(websocket) -> None:
     browser_protocol = BrowserWebSocketSerializer(
         text_processor=text_processor,
         state_processor=state_processor,
+        trace=trace,
     )
 
     transport = FastAPIWebsocketTransport(
@@ -456,18 +537,23 @@ async def run_pipecat_session(websocket) -> None:
         settings=GeminiLiveVertexLLMService.Settings(
             model=GEMINI_MODEL,
             voice="Charon",
-            language="en-US",
+            language="de-DE",
         ),
-        inference_on_context_initialization=False,
+        inference_on_context_initialization=True,
     )
 
+    booking_state = BookingSession()
     for tool_name in (
         "get_available_slots",
+        "prepare_booking",
         "book_meeting",
         "find_meeting_at",
         "reschedule_meeting",
     ):
-        llm.register_function(tool_name, _handle_pipecat_tool_call)
+        llm.register_function(
+            tool_name,
+            functools.partial(_handle_pipecat_tool_call, trace=trace, booking_state=booking_state),
+        )
 
     from pipecat.processors.aggregators.llm_context import LLMContext
 
@@ -504,18 +590,31 @@ async def run_pipecat_session(websocket) -> None:
 
     try:
         logger.info("Starting Pipecat Gemini Live session")
+        if trace:
+            await trace.event("pipeline_start", {"runtime": "pipecat_gemini_live"})
         await runner.run(worker)
     except Exception as e:
         logger.error("Pipecat session error: %s\n%s", e, traceback.format_exc())
+        if trace:
+            await trace.event("pipeline_error", {"error": str(e)})
         try:
             await websocket.send_json({"type": "error", "message": "Session error. Please refresh."})
         except Exception:
             pass
 
 
-async def _handle_pipecat_tool_call(params) -> None:
-    result = await _dispatch_tool(params.function_name, dict(params.arguments or {}))
-    await params.result_callback({"result": result})
+async def _handle_pipecat_tool_call(
+    params,
+    trace: TraceLogger | None = None,
+    booking_state: BookingSession | None = None,
+) -> None:
+    result = await _dispatch_tool(
+        params.function_name,
+        dict(params.arguments or {}),
+        trace=trace,
+        booking_state=booking_state,
+    )
+    await params.result_callback(result)
 
 
 async def run_raw_session(websocket) -> None:
@@ -524,6 +623,7 @@ async def run_raw_session(websocket) -> None:
     text_processor = TextOutputProcessor()
     session_state = SessionState()
     state_processor = StateProcessor(session_state)
+    booking_state = BookingSession()
     client = genai.Client(vertexai=True, project=GCP_PROJECT_ID, location=GCP_LOCATION)
 
     config = types.LiveConnectConfig(
@@ -549,7 +649,15 @@ async def run_raw_session(websocket) -> None:
     try:
         async with client.aio.live.connect(model=GEMINI_MODEL, config=config) as session:
             logger.info("Gemini Live session opened")
-            receive_task = asyncio.create_task(_receive_from_gemini(session, websocket, text_processor, state_processor))
+            receive_task = asyncio.create_task(
+                _receive_from_gemini(
+                    session,
+                    websocket,
+                    text_processor,
+                    state_processor,
+                    booking_state,
+                )
+            )
             send_task = asyncio.create_task(_send_from_client(session, websocket, audio_processor, interruption_processor))
 
             done, pending = await asyncio.wait(
@@ -622,13 +730,14 @@ async def _receive_from_gemini(
     websocket,
     text_processor: TextOutputProcessor,
     state_processor: StateProcessor,
+    booking_state: BookingSession,
 ) -> None:
     in_flight_tools: dict[str, asyncio.Task] = {}
     send_tool_lock = asyncio.Lock()
 
     async def execute_tool_call(fc) -> None:
         try:
-            result = await _dispatch_tool(fc.name, fc.args or {})
+            result = await _dispatch_tool(fc.name, fc.args or {}, booking_state=booking_state)
             if asyncio.current_task().cancelled():
                 return
             response = types.FunctionResponse(
@@ -710,8 +819,28 @@ async def _receive_from_gemini(
                 await task
 
 
-async def _dispatch_tool(name: str, args: dict) -> dict:
+async def _dispatch_tool(
+    name: str,
+    args: dict,
+    trace: TraceLogger | None = None,
+    booking_state: BookingSession | None = None,
+    transition_trace: TraceLogger | None = None,
+) -> dict:
+    if trace:
+        return await trace.trace_tool(
+            name,
+            args,
+            lambda: _dispatch_tool(
+                name,
+                args,
+                trace=None,
+                booking_state=booking_state,
+                transition_trace=trace,
+            ),
+        )
+
     try:
+        booking_state = booking_state or BookingSession()
         if name == "get_available_slots":
             now = datetime.now(BERLIN_TZ)
             days = args.get("days_ahead", 14)
@@ -726,19 +855,38 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
                 slot_type=slot_type,
                 buffer_minutes=BUFFER_MINUTES,
             )
-            return {"slots": slots[:6]}
+            slots_with_ids, _transitions = booking_state.record_availability(
+                slots[:6],
+                slot_type=slot_type,
+                duration_minutes=duration,
+            )
+            await _trace_booking_transitions(transition_trace, _transitions)
+            return {"success": True, "state": booking_state.state.value, "slots": slots_with_ids}
+
+        elif name == "prepare_booking":
+            result, _transitions = booking_state.prepare_booking(args)
+            await _trace_booking_transitions(transition_trace, _transitions)
+            return result
 
         elif name == "book_meeting":
-            return await calendar_service.create_event(
-                title=args["title"],
-                start_iso=args["start_iso"],
-                end_iso=args["end_iso"],
-                visitor_name=args["visitor_name"],
-                topic=args["topic"],
-                visitor_phone=args.get("visitor_phone"),
-                visitor_phone_confirmed=bool(args.get("visitor_phone_confirmed")),
-                meeting_type=args.get("meeting_type"),
+            async def create_event(**facts):
+                return await calendar_service.create_event(
+                    title=facts["title"],
+                    start_iso=facts["start_iso"],
+                    end_iso=facts["end_iso"],
+                    visitor_name=facts["visitor_name"],
+                    topic=facts["topic"],
+                    visitor_phone=facts.get("visitor_phone"),
+                    visitor_phone_confirmed=bool(facts.get("visitor_phone_confirmed")),
+                    meeting_type=facts.get("meeting_type"),
+                )
+
+            result, _transitions = await booking_state.book_prepared(
+                args,
+                create_event=create_event,
             )
+            await _trace_booking_transitions(transition_trace, _transitions)
+            return result
 
         elif name == "find_meeting_at":
             return await calendar_service.find_meeting_at(
@@ -754,11 +902,29 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
             )
 
         else:
-            return {"error": f"Unknown tool: {name}"}
+            return {"success": False, "error": f"Unknown tool: {name}"}
 
     except Exception as e:
         logger.error(f"Tool {name} error: {e}")
-        return {"error": str(e)}
+        return {"success": False, "error": str(e)}
+
+
+async def _trace_booking_transitions(
+    trace: TraceLogger | None,
+    transitions,
+) -> None:
+    if not trace:
+        return
+    for transition in transitions:
+        await trace.event(
+            "booking_state_transition",
+            {
+                "event": transition.event,
+                "from_state": transition.from_state,
+                "to_state": transition.to_state,
+                "metadata": transition.metadata,
+            },
+        )
 
 
 def build_pipecat_pipeline(websocket):
@@ -789,15 +955,20 @@ def build_pipecat_pipeline(websocket):
         settings=GeminiLiveVertexLLMService.Settings(
             model=GEMINI_MODEL,
             voice="Charon",
-            language="en-US",
+            language="de-DE",
         ),
-        inference_on_context_initialization=False,
+        inference_on_context_initialization=True,
     )
+    booking_state = BookingSession()
     for tool_name in (
         "get_available_slots",
+        "prepare_booking",
         "book_meeting",
         "find_meeting_at",
         "reschedule_meeting",
     ):
-        llm.register_function(tool_name, _handle_pipecat_tool_call)
+        llm.register_function(
+            tool_name,
+            functools.partial(_handle_pipecat_tool_call, booking_state=booking_state),
+        )
     return Pipeline([transport.input(), InitialContextProcessor(build_system_prompt()).processor, llm, transport.output()])
