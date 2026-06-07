@@ -1,17 +1,22 @@
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import pytz
 import google.auth
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from src.config import BUFFER_MINUTES, GOOGLE_CALENDAR_ID as CALENDAR_ID
+
+logger = logging.getLogger(__name__)
 
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 _service = None
+_calendar_subscribed = False
 
 
 def _get_service():
@@ -22,8 +27,40 @@ def _get_service():
     return _service
 
 
+def _ensure_calendar_subscribed():
+    """Subscribe the service account to the target calendar if not already in its list.
+
+    Service accounts don't auto-accept calendar sharing invites. Without an
+    explicit calendarList.insert() the service account can't find the calendar
+    and events.insert() returns 404 even when write access has been granted.
+    """
+    global _calendar_subscribed
+    if _calendar_subscribed:
+        return
+    svc = _get_service()
+    try:
+        svc.calendarList().get(calendarId=CALENDAR_ID).execute()
+        logger.info("Calendar %s already in service account list.", CALENDAR_ID)
+        _calendar_subscribed = True
+    except HttpError as e:
+        if e.resp.status == 404:
+            logger.info(
+                "Calendar %s not yet in service account list — subscribing.", CALENDAR_ID
+            )
+            svc.calendarList().insert(body={"id": CALENDAR_ID}).execute()
+            logger.info("Successfully subscribed to calendar %s.", CALENDAR_ID)
+            _calendar_subscribed = True
+        else:
+            logger.error(
+                "Could not subscribe to calendar %s: %s (status %s)",
+                CALENDAR_ID, e, e.resp.status,
+            )
+            raise
+
+
 async def get_calendar_ids() -> list[str]:
     def _fetch():
+        _ensure_calendar_subscribed()
         svc = _get_service()
         result = svc.calendarList().list().execute()
         ids = [item["id"] for item in result.get("items", [])]
@@ -164,6 +201,7 @@ async def create_event(
     meeting_type: Optional[str] = None,
 ) -> dict:
     def _create():
+        _ensure_calendar_subscribed()
         svc = _get_service()
         description_lines = [
             f"Meeting topic: {topic}",
