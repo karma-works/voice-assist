@@ -12,6 +12,13 @@ logger = logging.getLogger(__name__)
 
 from src.config import GCP_PROJECT_ID, GCP_LOCATION, GEMINI_MODEL, BUFFER_MINUTES
 from src import calendar_service
+from src.processors import (
+    AudioInputProcessor,
+    InterruptionProcessor,
+    SessionState,
+    StateProcessor,
+    TextOutputProcessor,
+)
 
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
 
@@ -42,7 +49,7 @@ TOOLS = [
             ),
             types.FunctionDeclaration(
                 name="book_meeting",
-                description="Book a meeting in the calendar. Only call after explicit visitor confirmation of time, name, and email.",
+                description="Book a meeting in the calendar. Only call after explicit visitor confirmation of time, visitor name, optional phone status, and topic.",
                 parameters=types.Schema(
                     type=types.Type.OBJECT,
                     properties={
@@ -50,10 +57,13 @@ TOOLS = [
                         "start_iso": types.Schema(type=types.Type.STRING, description="Start datetime ISO 8601 with timezone"),
                         "end_iso": types.Schema(type=types.Type.STRING, description="End datetime ISO 8601 with timezone"),
                         "visitor_name": types.Schema(type=types.Type.STRING),
-                        "visitor_email": types.Schema(type=types.Type.STRING, description="Email to send calendar invite to"),
+                        "visitor_phone": types.Schema(type=types.Type.STRING, description="Optional confirmed visitor phone number. Omit when declined or unconfirmed."),
+                        "visitor_phone_confirmed": types.Schema(type=types.Type.BOOLEAN, description="True only after explicit grouped readback confirmation."),
+                        "phone_collection_declined": types.Schema(type=types.Type.BOOLEAN, description="True if the visitor declined to provide a phone number."),
+                        "meeting_type": types.Schema(type=types.Type.STRING, description="'business' or 'private'"),
                         "topic": types.Schema(type=types.Type.STRING, description="Meeting topic/purpose"),
                     },
-                    required=["title", "start_iso", "end_iso", "visitor_name", "visitor_email", "topic"],
+                    required=["title", "start_iso", "end_iso", "visitor_name", "topic"],
                 ),
             ),
             types.FunctionDeclaration(
@@ -66,9 +76,9 @@ TOOLS = [
                             type=types.Type.STRING,
                             description="Approximate datetime ISO 8601 of the existing meeting",
                         ),
-                        "visitor_email": types.Schema(
+                        "visitor_phone": types.Schema(
                             type=types.Type.STRING,
-                            description="Optional: visitor email to match against guest list",
+                            description="Optional confirmed visitor phone number to match against app-created booking metadata",
                         ),
                     },
                     required=["approx_datetime_iso"],
@@ -92,6 +102,80 @@ TOOLS = [
 ]
 
 
+PIPECAT_TOOLS = [
+    {
+        "function_declarations": [
+            {
+                "name": "get_available_slots",
+                "description": "Get available meeting time slots. Use this to find when a meeting can be scheduled.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "days_ahead": {
+                            "type": "integer",
+                            "description": "How many days ahead to search. Default: 14",
+                        },
+                        "duration_minutes": {
+                            "type": "integer",
+                            "description": "Meeting duration in minutes. Default: 30",
+                        },
+                        "slot_type": {
+                            "type": "string",
+                            "description": "'business' or 'private'",
+                        },
+                    },
+                    "required": ["slot_type"],
+                },
+            },
+            {
+                "name": "book_meeting",
+                "description": "Book a meeting in the calendar. Only call after explicit visitor confirmation of time, visitor name, optional phone status, and topic.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "start_iso": {"type": "string"},
+                        "end_iso": {"type": "string"},
+                        "visitor_name": {"type": "string"},
+                        "visitor_phone": {"type": "string"},
+                        "visitor_phone_confirmed": {"type": "boolean"},
+                        "phone_collection_declined": {"type": "boolean"},
+                        "meeting_type": {"type": "string"},
+                        "topic": {"type": "string"},
+                    },
+                    "required": ["title", "start_iso", "end_iso", "visitor_name", "topic"],
+                },
+            },
+            {
+                "name": "find_meeting_at",
+                "description": "Find an existing meeting at an approximate time. Use to identify a meeting before rescheduling.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "approx_datetime_iso": {"type": "string"},
+                        "visitor_phone": {"type": "string"},
+                    },
+                    "required": ["approx_datetime_iso"],
+                },
+            },
+            {
+                "name": "reschedule_meeting",
+                "description": "Move an existing meeting to a new time. Requires event_id from find_meeting_at. Only call after visitor confirms the new time.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "event_id": {"type": "string"},
+                        "new_start_iso": {"type": "string"},
+                        "new_end_iso": {"type": "string"},
+                    },
+                    "required": ["event_id", "new_start_iso", "new_end_iso"],
+                },
+            },
+        ]
+    }
+]
+
+
 def build_system_prompt() -> str:
     now = datetime.now(BERLIN_TZ)
     weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -109,7 +193,7 @@ LANGUAGE RULES:
 - Keep responses short and natural — this is a voice conversation.
 - Speak in short fragments, with contractions in English where natural.
 - Output plain spoken text only: no markdown, bullet points, tables, URLs, code formatting, or emoji.
-- Say numbers, dates, times, email addresses, and symbols in a TTS-friendly way instead of relying on punctuation.
+- Say numbers, dates, times, phone numbers, and symbols in a TTS-friendly way instead of relying on punctuation.
 
 YOUR CAPABILITIES:
 - Find available meeting slots
@@ -130,21 +214,263 @@ BOOKING FLOW:
 1. Greet and ask what the meeting is about (to infer type).
 2. Call get_available_slots, present 3 concrete options with day and time.
 3. Visitor picks a slot → ask for full name.
-4. Ask for email, read it back letter by letter for confirmation.
-5. Confirm all details, then call book_meeting.
-6. After booking: confirm and say they'll receive a calendar invite.
+4. Ask whether they want to provide a phone number. Make clear it is optional.
+5. If they decline, continue booking without a phone number.
+6. If they provide one, collect it in chunks. Preserve country codes and leading zeros. Re-ask only unclear chunks.
+7. Read the phone number back in grouped chunks and require explicit confirmation before storing it.
+8. Confirm all details, then call book_meeting.
+9. After booking: confirm the booking in this conversation. Do not promise an automatic visitor calendar invite.
 
 RESCHEDULE FLOW:
 1. Ask for approximate date/time of existing meeting.
 2. Call find_meeting_at to locate it.
 3. Find new slot, confirm, then call reschedule_meeting.
 
-EMAIL CONFIRMATION (German example): "Ich habe m-a-x punkt m-u-s-t-e-r at g-m-a-i-l punkt d-e — ist das korrekt?"
+PHONE CONFIRMATION (German example): "Ich habe plus vier neun, eins sieben eins, eins zwei drei vier, fünf sechs sieben. Ist das korrekt?"
+
+If phone confirmation fails twice, say you can continue without a phone number and finish the booking.
 
 PRIVACY: If asked about other calendar entries: "Ich sehe nur die Verfügbarkeit, keine Termindetails." """
 
 
+class BrowserWebSocketSerializer:
+    """Serialize Pipecat frames to the existing browser WebSocket protocol."""
+
+    def __init__(
+        self,
+        *,
+        input_sample_rate: int = 16000,
+        output_sample_rate: int = 24000,
+        text_processor: TextOutputProcessor | None = None,
+        state_processor: StateProcessor | None = None,
+        interruption_processor: InterruptionProcessor | None = None,
+    ) -> None:
+        from pipecat.serializers.base_serializer import FrameSerializer
+
+        class _Serializer(FrameSerializer):
+            async def serialize(inner_self, frame):
+                return await self._serialize(frame)
+
+            async def deserialize(inner_self, data):
+                return await self._deserialize(data)
+
+        self._serializer = _Serializer()
+        self.input_sample_rate = input_sample_rate
+        self.output_sample_rate = output_sample_rate
+        self.audio_processor = AudioInputProcessor(expected_sample_rate=input_sample_rate)
+        self.text_processor = text_processor or TextOutputProcessor()
+        self.state_processor = state_processor
+        self.interruption_processor = interruption_processor or InterruptionProcessor()
+
+    @property
+    def serializer(self):
+        return self._serializer
+
+    async def _deserialize(self, data: str | bytes):
+        from pipecat.frames.frames import (
+            EndFrame,
+            InputAudioRawFrame,
+            InputTextRawFrame,
+            InterruptionFrame,
+        )
+
+        if isinstance(data, bytes):
+            if not self.audio_processor.observe_pcm16(data):
+                return None
+            return InputAudioRawFrame(
+                audio=data,
+                sample_rate=self.input_sample_rate,
+                num_channels=1,
+            )
+
+        try:
+            message = json.loads(data)
+        except json.JSONDecodeError:
+            return None
+
+        msg_type = message.get("type")
+        if msg_type == "end":
+            return EndFrame(reason="client_end")
+        if msg_type == "interrupt":
+            return InterruptionFrame()
+        if msg_type == "transcript_hint":
+            text = message.get("text", "")
+            if self.interruption_processor.classify_text(text) == "interruption":
+                return InterruptionFrame()
+            if text:
+                return InputTextRawFrame(text=text)
+        return None
+
+    async def _serialize(self, frame) -> str | bytes | None:
+        from pipecat.frames.frames import (
+            ErrorFrame,
+            InterruptionFrame,
+            LLMFullResponseEndFrame,
+            OutputAudioRawFrame,
+            OutputTransportMessageFrame,
+            OutputTransportMessageUrgentFrame,
+            TranscriptionFrame,
+            TTSAudioRawFrame,
+            TTSTextFrame,
+        )
+
+        if isinstance(frame, (OutputAudioRawFrame, TTSAudioRawFrame)):
+            return frame.audio
+
+        if isinstance(frame, InterruptionFrame):
+            return json.dumps({"type": "interrupted"})
+
+        if isinstance(frame, TranscriptionFrame) and frame.text:
+            return json.dumps({"type": "transcript", "role": "user", "text": frame.text})
+
+        if isinstance(frame, TTSTextFrame) and frame.text:
+            text = self.text_processor.normalize(frame.text)
+            if self.state_processor:
+                self.state_processor.record_assistant_playback(text)
+            return json.dumps({"type": "transcript", "role": "assistant", "text": text})
+
+        if isinstance(frame, LLMFullResponseEndFrame):
+            return json.dumps({"type": "turn_complete"})
+
+        if isinstance(frame, (OutputTransportMessageFrame, OutputTransportMessageUrgentFrame)):
+            if isinstance(frame.message, str):
+                return frame.message
+            return json.dumps(frame.message)
+
+        if isinstance(frame, ErrorFrame):
+            message = getattr(frame, "error", None) or getattr(frame, "message", None) or "Session error."
+            return json.dumps({"type": "error", "message": str(message)})
+
+        return None
+
+
+class InitialContextProcessor:
+    """Inject an LLM context once so Gemini Live can execute registered tools."""
+
+    def __init__(self, system_prompt: str) -> None:
+        from pipecat.processors.frame_processor import FrameProcessor
+
+        class _Processor(FrameProcessor):
+            async def process_frame(inner_self, frame, direction):
+                from pipecat.frames.frames import LLMContextFrame, StartFrame
+                from pipecat.processors.aggregators.llm_context import LLMContext
+
+                await super(_Processor, inner_self).process_frame(frame, direction)
+                await inner_self.push_frame(frame, direction)
+                if isinstance(frame, StartFrame):
+                    await inner_self.push_frame(LLMContextFrame(LLMContext()))
+
+        self.processor = _Processor(name="initial-context")
+
+
 async def run_session(websocket) -> None:
+    await run_pipecat_session(websocket)
+
+
+async def run_pipecat_session(websocket) -> None:
+    from pipecat.pipeline.pipeline import Pipeline
+    from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+    from pipecat.services.google.gemini_live.vertex.llm import GeminiLiveVertexLLMService
+    from pipecat.transports.websocket.fastapi import (
+        FastAPIWebsocketParams,
+        FastAPIWebsocketTransport,
+    )
+    from pipecat.workers.runner import WorkerRunner
+
+    text_processor = TextOutputProcessor()
+    session_state = SessionState()
+    state_processor = StateProcessor(session_state)
+    browser_protocol = BrowserWebSocketSerializer(
+        text_processor=text_processor,
+        state_processor=state_processor,
+    )
+
+    transport = FastAPIWebsocketTransport(
+        websocket,
+        FastAPIWebsocketParams(
+            audio_in_enabled=True,
+            audio_in_sample_rate=16000,
+            audio_in_channels=1,
+            audio_out_enabled=True,
+            audio_out_sample_rate=24000,
+            audio_out_channels=1,
+            serializer=browser_protocol.serializer,
+            session_timeout=3600,
+        ),
+    )
+
+    llm = GeminiLiveVertexLLMService(
+        project_id=GCP_PROJECT_ID,
+        location=GCP_LOCATION,
+        system_instruction=build_system_prompt(),
+        tools=PIPECAT_TOOLS,
+        settings=GeminiLiveVertexLLMService.Settings(
+            model=GEMINI_MODEL,
+            voice="Charon",
+            language="en-US",
+        ),
+        inference_on_context_initialization=False,
+    )
+
+    for tool_name in (
+        "get_available_slots",
+        "book_meeting",
+        "find_meeting_at",
+        "reschedule_meeting",
+    ):
+        llm.register_function(tool_name, _handle_pipecat_tool_call)
+
+    pipeline = Pipeline(
+        [
+            transport.input(),
+            InitialContextProcessor(build_system_prompt()).processor,
+            llm,
+            transport.output(),
+        ]
+    )
+    worker = PipelineWorker(
+        pipeline,
+        params=PipelineParams(
+            audio_in_sample_rate=16000,
+            audio_out_sample_rate=24000,
+            enable_metrics=True,
+            enable_usage_metrics=True,
+        ),
+        idle_timeout_secs=3600,
+        enable_rtvi=False,
+    )
+    runner = WorkerRunner(handle_sigint=False, handle_sigterm=False)
+
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(_transport, _client):
+        await runner.cancel()
+
+    @transport.event_handler("on_session_timeout")
+    async def on_session_timeout(_transport, _client):
+        await runner.cancel()
+
+    try:
+        logger.info("Starting Pipecat Gemini Live session")
+        await runner.run(worker)
+    except Exception as e:
+        logger.error("Pipecat session error: %s\n%s", e, traceback.format_exc())
+        try:
+            await websocket.send_json({"type": "error", "message": "Session error. Please refresh."})
+        except Exception:
+            pass
+
+
+async def _handle_pipecat_tool_call(params) -> None:
+    result = await _dispatch_tool(params.function_name, dict(params.arguments or {}))
+    await params.result_callback({"result": result})
+
+
+async def run_raw_session(websocket) -> None:
+    audio_processor = AudioInputProcessor()
+    interruption_processor = InterruptionProcessor()
+    text_processor = TextOutputProcessor()
+    session_state = SessionState()
+    state_processor = StateProcessor(session_state)
     client = genai.Client(vertexai=True, project=GCP_PROJECT_ID, location=GCP_LOCATION)
 
     config = types.LiveConnectConfig(
@@ -170,8 +496,8 @@ async def run_session(websocket) -> None:
     try:
         async with client.aio.live.connect(model=GEMINI_MODEL, config=config) as session:
             logger.info("Gemini Live session opened")
-            receive_task = asyncio.create_task(_receive_from_gemini(session, websocket))
-            send_task = asyncio.create_task(_send_from_client(session, websocket))
+            receive_task = asyncio.create_task(_receive_from_gemini(session, websocket, text_processor, state_processor))
+            send_task = asyncio.create_task(_send_from_client(session, websocket, audio_processor, interruption_processor))
 
             done, pending = await asyncio.wait(
                 [receive_task, send_task],
@@ -201,7 +527,12 @@ async def run_session(websocket) -> None:
             pass
 
 
-async def _send_from_client(session, websocket) -> None:
+async def _send_from_client(
+    session,
+    websocket,
+    audio_processor: AudioInputProcessor,
+    interruption_processor: InterruptionProcessor,
+) -> None:
     try:
         while True:
             message = await websocket.receive()
@@ -210,6 +541,8 @@ async def _send_from_client(session, websocket) -> None:
 
             if "bytes" in message and message["bytes"]:
                 audio_data = message["bytes"]
+                if not audio_processor.observe_pcm16(audio_data):
+                    continue
                 await session.send_realtime_input(
                     audio=types.Blob(data=audio_data, mime_type="audio/pcm;rate=16000")
                 )
@@ -220,6 +553,10 @@ async def _send_from_client(session, websocket) -> None:
                         break
                     if data.get("type") == "interrupt":
                         await session.send_realtime_input(activity_start=types.ActivityStart())
+                    if data.get("type") == "transcript_hint":
+                        classification = interruption_processor.classify_text(data.get("text", ""))
+                        if classification == "interruption":
+                            await session.send_realtime_input(activity_start=types.ActivityStart())
                 except json.JSONDecodeError:
                     pass
     except Exception as e:
@@ -227,7 +564,12 @@ async def _send_from_client(session, websocket) -> None:
             logger.error(f"Client send error: {e}")
 
 
-async def _receive_from_gemini(session, websocket) -> None:
+async def _receive_from_gemini(
+    session,
+    websocket,
+    text_processor: TextOutputProcessor,
+    state_processor: StateProcessor,
+) -> None:
     in_flight_tools: dict[str, asyncio.Task] = {}
     send_tool_lock = asyncio.Lock()
 
@@ -282,6 +624,7 @@ async def _receive_from_gemini(session, websocket) -> None:
                     sc = response.server_content
 
                     if sc.interrupted:
+                        state_processor.rewind_unplayed_assistant_tail()
                         await websocket.send_json({"type": "interrupted"})
 
                     if sc.input_transcription and sc.input_transcription.text:
@@ -292,10 +635,12 @@ async def _receive_from_gemini(session, websocket) -> None:
                         })
 
                     if sc.output_transcription and sc.output_transcription.text:
+                        text = text_processor.normalize(sc.output_transcription.text)
+                        state_processor.record_assistant_playback(text)
                         await websocket.send_json({
                             "type": "transcript",
                             "role": "assistant",
-                            "text": sc.output_transcription.text,
+                            "text": text,
                         })
 
                     if sc.turn_complete:
@@ -336,14 +681,16 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
                 start_iso=args["start_iso"],
                 end_iso=args["end_iso"],
                 visitor_name=args["visitor_name"],
-                visitor_email=args["visitor_email"],
                 topic=args["topic"],
+                visitor_phone=args.get("visitor_phone"),
+                visitor_phone_confirmed=bool(args.get("visitor_phone_confirmed")),
+                meeting_type=args.get("meeting_type"),
             )
 
         elif name == "find_meeting_at":
             return await calendar_service.find_meeting_at(
                 approx_datetime_iso=args["approx_datetime_iso"],
-                visitor_email=args.get("visitor_email"),
+                visitor_phone=args.get("visitor_phone"),
             )
 
         elif name == "reschedule_meeting":
@@ -359,3 +706,45 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
     except Exception as e:
         logger.error(f"Tool {name} error: {e}")
         return {"error": str(e)}
+
+
+def build_pipecat_pipeline(websocket):
+    """Build the Pipecat pipeline used by the active runtime."""
+    from pipecat.pipeline.pipeline import Pipeline
+    from pipecat.services.google.gemini_live.vertex.llm import GeminiLiveVertexLLMService
+    from pipecat.transports.websocket.fastapi import (
+        FastAPIWebsocketParams,
+        FastAPIWebsocketTransport,
+    )
+
+    browser_protocol = BrowserWebSocketSerializer()
+    transport = FastAPIWebsocketTransport(
+        websocket,
+        FastAPIWebsocketParams(
+            audio_in_enabled=True,
+            audio_in_sample_rate=16000,
+            audio_out_enabled=True,
+            audio_out_sample_rate=24000,
+            serializer=browser_protocol.serializer,
+        ),
+    )
+    llm = GeminiLiveVertexLLMService(
+        project_id=GCP_PROJECT_ID,
+        location=GCP_LOCATION,
+        system_instruction=build_system_prompt(),
+        tools=PIPECAT_TOOLS,
+        settings=GeminiLiveVertexLLMService.Settings(
+            model=GEMINI_MODEL,
+            voice="Charon",
+            language="en-US",
+        ),
+        inference_on_context_initialization=False,
+    )
+    for tool_name in (
+        "get_available_slots",
+        "book_meeting",
+        "find_meeting_at",
+        "reschedule_meeting",
+    ):
+        llm.register_function(tool_name, _handle_pipecat_tool_call)
+    return Pipeline([transport.input(), InitialContextProcessor(build_system_prompt()).processor, llm, transport.output()])

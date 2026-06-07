@@ -44,6 +44,33 @@
     #status.speaking { background: #6b3a1a; }
     #status.error { background: #6b1a1a; }
     #status.connecting { background: #3a3a6b; }
+    .readiness {
+      display: grid;
+      gap: 8px;
+      margin: 0 auto 20px;
+      max-width: 320px;
+      text-align: left;
+    }
+    .readiness-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: #0d1b2a;
+      color: #aaa;
+      font-size: 0.85rem;
+    }
+    .readiness-item.ready { color: #98e0a0; }
+    .readiness-item.down { color: #ff9b9b; }
+    #outage {
+      display: none;
+      color: #ffb4b4;
+      margin: -8px auto 20px;
+      max-width: 320px;
+      font-size: 0.86rem;
+      line-height: 1.4;
+    }
     #mic-btn {
       width: 100px;
       height: 100px;
@@ -122,6 +149,16 @@
     </div>
 
     <div id="status" class="connecting">Connecting...</div>
+
+    <div class="readiness" aria-live="polite">
+      <div class="readiness-item" id="voice-ready">
+        <span>Voice</span><span>Checking...</span>
+      </div>
+      <div class="readiness-item" id="calendar-ready">
+        <span>Calendar</span><span>Checking...</span>
+      </div>
+    </div>
+    <div id="outage"></div>
 
     <button id="mic-btn" disabled title="Tap to start listening">🎤</button>
 

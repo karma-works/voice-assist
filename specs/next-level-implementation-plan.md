@@ -5,51 +5,51 @@
 
 ## Phase 1: Specification Alignment
 
-- [ ] Update product docs to replace required visitor email with optional phone number.
-- [ ] Update success criteria to remove dependency on automatic Google Calendar guest email.
-- [ ] Add ADR-009, ADR-010, and ADR-011 to the specs index.
-- [ ] Mark raw Gemini socket proxy language as superseded by the Pipecat pipeline architecture.
+- [x] Update product docs to replace required visitor email with optional phone number.
+- [x] Update success criteria to remove dependency on automatic Google Calendar guest email.
+- [x] Add ADR-009, ADR-010, and ADR-011 to the specs index.
+- [x] Mark raw Gemini socket proxy language as superseded by the Pipecat pipeline architecture.
 
 ## Phase 2: Pipecat Pipeline Migration
 
-- [ ] Update dependencies for the current Pipecat Gemini Live integration.
-- [ ] Refactor `src/session.py` into a Pipecat pipeline builder.
-- [ ] Instantiate `GeminiLiveLLMService` with:
+- [x] Update dependencies for the current Pipecat Gemini Live integration.
+- [x] Refactor `src/session.py` into a Pipecat pipeline builder.
+- [x] Instantiate `GeminiLiveLLMService` with:
   - Gemini Live model setting.
   - Voice setting.
   - System instruction builder.
   - Scheduling tool schema.
   - Realtime-service-aware context aggregation.
-- [ ] Keep FastAPI as the backend HTTP/WebSocket host.
+- [x] Keep FastAPI as the backend HTTP/WebSocket host.
 - [ ] Make the browser transport feed Pipecat frames rather than manually forwarding Gemini socket messages.
 - [ ] Add lifecycle cleanup for disconnect, cancellation, timeout, and reconnect.
 
 ## Phase 3: Middleware Insertion Points
 
-- [ ] Add input audio processor interface:
+- [x] Add input audio processor interface:
   - frame counters
   - sample-rate validation
   - input-level metrics
   - future noise/gain filters
-- [ ] Add interruption processor:
+- [x] Add interruption processor:
   - classifies backchannel versus interruption
   - emits client cleardown signal
   - cancels active assistant output
   - marks transcript rewind boundary
-- [ ] Add text output processor:
+- [x] Add text output processor:
   - strips Markdown
   - normalizes dates and numbers for speech
   - formats phone-number readback
   - blocks accidental calendar-detail leakage
-- [ ] Add state processor:
+- [x] Add state processor:
   - separates confirmed facts from raw transcript
   - records spoken assistant text only after playback progress
   - supports reconnect resume
 
 ## Phase 4: Optional Phone-Number Flow
 
-- [ ] Replace email prompt with optional phone-number prompt.
-- [ ] Add phone state fields:
+- [x] Replace email prompt with optional phone-number prompt.
+- [x] Add phone state fields:
   - `visitor_phone`
   - `visitor_phone_confirmed`
   - `phone_collection_declined`
@@ -58,22 +58,22 @@
   - preserve leading zeros
   - allow pauses after three or four digits
   - re-ask only low-confidence chunks
-- [ ] Implement readback grouping:
+- [x] Implement readback grouping:
   - three-four-three for ten-digit local numbers
   - country-code plus two-to-four digit chunks for international numbers
-- [ ] Require explicit confirmation before storing a phone number.
-- [ ] Allow booking to complete when phone number is declined.
-- [ ] Update calendar event creation so visitor email is not required.
+- [x] Require explicit confirmation before storing a phone number.
+- [x] Allow booking to complete when phone number is declined.
+- [x] Update calendar event creation so visitor email is not required.
 
 ## Phase 5: Readiness and Outage UX
 
-- [ ] Add backend readiness endpoint that reports:
+- [x] Add backend readiness endpoint that reports:
   - voice API active/usable
   - calendar connected and freebusy query possible
   - no calendar event titles, descriptions, or participants in readiness responses
-- [ ] Check voice readiness by validating Gemini/Pipecat configuration and performing the lightest safe session or configuration check available.
-- [ ] Check calendar readiness by validating credentials and performing a minimal freebusy-safe connectivity check.
-- [ ] Update UI before voice start:
+- [x] Check voice readiness by validating Gemini/Pipecat configuration and performing the lightest safe session or configuration check available.
+- [x] Check calendar readiness by validating credentials and performing a minimal freebusy-safe connectivity check.
+- [x] Update UI before voice start:
   - show "Voice ready" only when the voice API is usable
   - show "Calendar connected" only when Google Calendar is connected
   - disable Start if either dependency is unavailable
@@ -88,11 +88,11 @@
   - tool-call latency
   - reconnect recovery time
   - dropped audio frames
-- [ ] Configure browser audio capture with echo cancellation, noise suppression, and auto gain where available.
+- [x] Configure browser audio capture with echo cancellation, noise suppression, and auto gain where available.
 - [ ] Add immediate playback-buffer cleardown on interruption.
 - [ ] Add server cancellation for active model output and pending non-critical tool work.
 - [ ] Add transcript rewind so interrupted assistant text is not treated as spoken context.
-- [ ] Update system prompt:
+- [x] Update system prompt:
   - short spoken turns
   - contractions
   - no Markdown
@@ -105,7 +105,7 @@
 
 ## Phase 7: Persistence and Reconnect
 
-- [ ] Define `SessionState` with confirmed facts:
+- [x] Define `SessionState` with confirmed facts:
   - invite id
   - language
   - visitor name
@@ -114,7 +114,7 @@
   - topic
   - selected slot
   - confirmation status
-- [ ] Store short-term state in memory for local dev.
+- [x] Store short-term state in memory for local dev.
 - [ ] Store reconnectable session state in Firestore or another server-side store before production.
 - [ ] On reconnect, resume from confirmed facts rather than raw transcript.
 - [ ] Expire abandoned session state after a short TTL.

@@ -10,6 +10,9 @@ const transcriptEl = document.getElementById('transcript');
 const mainCard = document.getElementById('main-card');
 const errorPage = document.getElementById('error-page');
 const waveformBars = document.querySelectorAll('.bar');
+const voiceReadyEl = document.getElementById('voice-ready');
+const calendarReadyEl = document.getElementById('calendar-ready');
+const outageEl = document.getElementById('outage');
 
 let ws = null;
 let reconnectAttempts = 0;
@@ -57,6 +60,46 @@ function setStatus(text, cls = '') {
 function showError() {
   mainCard.style.display = 'none';
   errorPage.style.display = 'block';
+}
+
+function setReadinessRow(el, label, state) {
+  el.className = 'readiness-item ' + (state.ready ? 'ready' : 'down');
+  el.children[0].textContent = label;
+  el.children[1].textContent = state.ready ? 'Ready' : 'Unavailable';
+}
+
+async function checkReadiness() {
+  setStatus('Checking readiness...', 'connecting');
+  try {
+    const res = await fetch('/readiness', { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    setReadinessRow(voiceReadyEl, 'Voice', data.voice || { ready: false });
+    setReadinessRow(calendarReadyEl, 'Calendar', data.calendar || { ready: false });
+
+    if (data.ready) {
+      outageEl.style.display = 'none';
+      return true;
+    }
+
+    const messages = [];
+    if (!data.voice?.ready) messages.push('Voice service is temporarily unavailable. Please try again later.');
+    if (!data.calendar?.ready) messages.push('Calendar connection is unavailable. Scheduling is temporarily offline.');
+    outageEl.textContent = messages.join(' ');
+    outageEl.style.display = 'block';
+    setStatus('Scheduling unavailable', 'error');
+    micBtn.disabled = true;
+    return false;
+  } catch (e) {
+    setReadinessRow(voiceReadyEl, 'Voice', { ready: false });
+    setReadinessRow(calendarReadyEl, 'Calendar', { ready: false });
+    outageEl.textContent = 'Readiness check failed. Please try again later.';
+    outageEl.style.display = 'block';
+    setStatus('Scheduling unavailable', 'error');
+    micBtn.disabled = true;
+    dbg('Readiness error: ' + e.message);
+    return false;
+  }
 }
 
 function addTranscript(role, text) {
@@ -249,7 +292,15 @@ registerProcessor('capture-processor', CaptureProcessor);
 async function startCapture() {
   if (capturing) return;
   try {
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 }, video: false });
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1
+      },
+      video: false
+    });
     dbg('Mic granted, device rate=' + (micStream.getAudioTracks()[0]?.getSettings().sampleRate || '?') + 'Hz');
 
     captureCtx = new AudioContext();  // use device's native rate
@@ -390,4 +441,11 @@ async function toggleMic() {
 
 micBtn.addEventListener('click', toggleMic);
 
-connect();
+async function boot() {
+  const invite = getInviteToken();
+  if (!invite) { showError(); return; }
+  const ready = await checkReadiness();
+  if (ready) connect();
+}
+
+boot();

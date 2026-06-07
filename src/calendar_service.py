@@ -26,7 +26,10 @@ async def get_calendar_ids() -> list[str]:
     def _fetch():
         svc = _get_service()
         result = svc.calendarList().list().execute()
-        return [item["id"] for item in result.get("items", [])]
+        ids = [item["id"] for item in result.get("items", [])]
+        if CALENDAR_ID not in ids:
+            ids.append(CALENDAR_ID)
+        return ids
     return await asyncio.get_event_loop().run_in_executor(None, _fetch)
 
 
@@ -51,6 +54,29 @@ async def get_busy_times(time_min: datetime, time_max: datetime) -> list[tuple[d
         return busy
 
     return await asyncio.get_event_loop().run_in_executor(None, _fetch)
+
+
+async def readiness_check() -> dict:
+    """Validate calendar connectivity without returning event contents."""
+    now = datetime.now(timezone.utc)
+    try:
+        calendar_ids = await get_calendar_ids()
+        if not calendar_ids:
+            return {"ready": False, "message": "No calendars are visible to the service account."}
+
+        def _freebusy_probe():
+            svc = _get_service()
+            body = {
+                "timeMin": now.isoformat(),
+                "timeMax": (now + timedelta(minutes=1)).isoformat(),
+                "items": [{"id": calendar_ids[0]}],
+            }
+            svc.freebusy().query(body=body).execute()
+
+        await asyncio.get_event_loop().run_in_executor(None, _freebusy_probe)
+        return {"ready": True, "message": "Calendar connected."}
+    except Exception as exc:
+        return {"ready": False, "message": f"Calendar connection unavailable: {exc}"}
 
 
 async def get_available_slots(
@@ -132,19 +158,28 @@ async def create_event(
     start_iso: str,
     end_iso: str,
     visitor_name: str,
-    visitor_email: str,
     topic: str,
+    visitor_phone: Optional[str] = None,
+    visitor_phone_confirmed: bool = False,
+    meeting_type: Optional[str] = None,
 ) -> dict:
     def _create():
         svc = _get_service()
+        description_lines = [
+            f"Meeting topic: {topic}",
+            "Scheduled via voice assistant.",
+        ]
+        if visitor_phone and visitor_phone_confirmed:
+            description_lines.append(f"Confirmed visitor phone: {visitor_phone}")
+        if meeting_type:
+            description_lines.append(f"Meeting type: {meeting_type}")
         event = {
             "summary": title,
-            "description": f"Meeting topic: {topic}\nScheduled via voice assistant.",
+            "description": "\n".join(description_lines),
             "start": {"dateTime": start_iso, "timeZone": "Europe/Berlin"},
             "end": {"dateTime": end_iso, "timeZone": "Europe/Berlin"},
-            "attendees": [{"email": visitor_email, "displayName": visitor_name}],
         }
-        return svc.events().insert(calendarId=CALENDAR_ID, body=event, sendUpdates="all").execute()
+        return svc.events().insert(calendarId=CALENDAR_ID, body=event, sendUpdates="none").execute()
 
     result = await asyncio.get_event_loop().run_in_executor(None, _create)
     return {"event_id": result["id"], "html_link": result.get("htmlLink", "")}
@@ -152,7 +187,7 @@ async def create_event(
 
 async def find_meeting_at(
     approx_datetime_iso: str,
-    visitor_email: Optional[str] = None,
+    visitor_phone: Optional[str] = None,
     tolerance_minutes: int = 30,
 ) -> dict:
     def _find():
@@ -174,9 +209,9 @@ async def find_meeting_at(
             end_str = event.get("end", {}).get("dateTime") or event.get("end", {}).get("date")
             if not start_str or not end_str:
                 continue
-            if visitor_email:
-                attendees = [a.get("email", "").lower() for a in event.get("attendees", [])]
-                if visitor_email.lower() not in attendees:
+            if visitor_phone:
+                description = event.get("description", "")
+                if visitor_phone not in description:
                     continue
             matches.append({"event_id": event["id"], "start": start_str, "end": end_str})
 
