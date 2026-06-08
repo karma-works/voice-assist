@@ -459,7 +459,7 @@ async def run_pipecat_session(websocket, trace: TraceLogger | None = None) -> No
         tools=PIPECAT_TOOLS,
         settings=GeminiLiveVertexLLMService.Settings(
             model=GEMINI_MODEL,
-            voice="Charon",
+            voice="Leda",
             language="de-DE",
         ),
         inference_on_context_initialization=True,
@@ -673,7 +673,7 @@ def build_pipecat_pipeline(websocket):
         tools=PIPECAT_TOOLS,
         settings=GeminiLiveVertexLLMService.Settings(
             model=GEMINI_MODEL,
-            voice="Charon",
+            voice="Leda",
             language="de-DE",
         ),
         inference_on_context_initialization=True,

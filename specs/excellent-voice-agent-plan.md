@@ -122,7 +122,7 @@ Acceptance:
 
 Implementation:
 
-- Keep Cloud Run warm with `min_instances=1`.
+- Keep Cloud Run warm with `min_instances=0`. (min-instances = 1 is recommendable, however we don't want the costs until the application is productive)
 - Start model/session setup as soon as the user opens a valid invite page, if cost and quota allow.
 - Separate readiness checks from the first voice turn.
 - Measure:

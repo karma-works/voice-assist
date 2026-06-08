@@ -33,7 +33,7 @@ def _voice_readiness() -> dict:
         GeminiLiveVertexLLMService(
             project_id=GCP_PROJECT_ID,
             location=GCP_LOCATION,
-            voice_id="Charon",
+            voice_id="Leda",
             system_instruction="Readiness check.",
             settings=GeminiLiveVertexLLMService.Settings(
                 model=GEMINI_MODEL.replace("google/", ""),

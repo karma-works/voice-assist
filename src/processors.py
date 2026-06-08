@@ -62,8 +62,23 @@ class AudioInputProcessor:
 
 
 class InterruptionProcessor:
-    BACKCHANNELS = {"uh-huh", "mhm", "okay", "ok", "ja", "genau", "yes"}
-    INTERRUPT_WORDS = {"stop", "stopp", "warte", "wait", "nein", "no", "cancel"}
+    # Backchannels are acknowledgements that should NOT take the floor from the
+    # assistant. The client's two-stage VAD gate already suppresses brief bursts
+    # by duration; this lexicon is the semantic layer, applied when a short
+    # transcript hint is available (see BrowserWebSocketSerializer.transcript_hint).
+    BACKCHANNELS = {
+        # English
+        "uh-huh", "uh huh", "mhm", "mm-hmm", "okay", "ok", "yes", "yeah",
+        "right", "sure", "i see",
+        # German affirmations / acknowledgements
+        "ja", "jaja", "jo", "joa", "jep", "genau", "aha", "ah", "hm", "hmm",
+        "mhmm", "klar", "na klar", "alles klar", "gut", "okay gut", "verstehe",
+        "stimmt", "richtig", "eben", "ach so", "achso",
+    }
+    INTERRUPT_WORDS = {
+        "stop", "stopp", "halt", "warte", "wait", "moment", "nein", "no",
+        "cancel", "abbrechen", "quatsch",
+    }
 
     def classify_text(self, text: str) -> str:
         normalized = text.strip().lower().strip(".!?")
