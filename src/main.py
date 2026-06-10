@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 from src import calendar_service
-from src.config import GCP_LOCATION, GCP_PROJECT_ID, GEMINI_MODEL
+from src.config import COMFORT_BED_ENABLED, GCP_LOCATION, GCP_PROJECT_ID, GEMINI_MODEL
 from src.invite import validate_invite
 from src.observability import TraceLogger
 from src.session import run_session
@@ -52,6 +52,7 @@ async def readiness():
         "ready": voice["ready"] and calendar["ready"],
         "voice": voice,
         "calendar": calendar,
+        "config": {"comfort_bed_enabled": COMFORT_BED_ENABLED},
     }
 
 

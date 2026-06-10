@@ -51,7 +51,7 @@ jobs:
             --timeout 3600 \
             --memory 512Mi \
             --cpu 1 \
-            --set-env-vars "GCP_PROJECT_ID=${{ env.PROJECT_ID }},GCP_LOCATION=europe-west1,GOOGLE_CALENDAR_ID=${{ secrets.GOOGLE_CALENDAR_ID }},GOOGLE_OAUTH_CLIENT_ID=${{ secrets.GOOGLE_OAUTH_CLIENT_ID }},GOOGLE_OAUTH_CLIENT_SECRET=${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}" \
+            --set-env-vars "GCP_PROJECT_ID=${{ env.PROJECT_ID }},GCP_LOCATION=europe-west1,GOOGLE_CALENDAR_ID=${{ secrets.GOOGLE_CALENDAR_ID }},GOOGLE_OAUTH_CLIENT_ID=${{ secrets.GOOGLE_OAUTH_CLIENT_ID }},GOOGLE_OAUTH_CLIENT_SECRET=${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }},COMFORT_BED_ENABLED=${{ vars.COMFORT_BED_ENABLED || 'false' }}" \
             --set-secrets "GOOGLE_CALENDAR_REFRESH_TOKEN=GOOGLE_CALENDAR_REFRESH_TOKEN:latest" \
             --project ${{ env.PROJECT_ID }}
 

@@ -27,13 +27,16 @@ let micStream = null;
 let capturing = false;
 let keepAliveGain = null;
 
-// Audio playback
+// Audio playback — a single AudioWorklet sink resamples and plays one
+// continuous PCM stream (see ensurePlayCtx / PLAYBACK_WORKLET_CODE). We do NOT
+// create one AudioBufferSource per network chunk: that resampled every chunk
+// independently (24 kHz → device rate with no continuity across boundaries),
+// producing a seam click at every chunk and gaps from manual-clock drift. The
+// worklet keeps a jitter buffer and rides the audio clock instead.
 let playCtx = null;
-let nextPlayTime = 0;
-let audioQueue = [];
+let playNode = null;
+let playWorkletReady = false;
 let isPlaying = false;
-let schedulingAudio = false;
-let activeSources = new Set();
 let assistantAudioActive = false;
 let assistantAudioStartedAt = 0;
 let lastInterruptAt = 0;
@@ -80,6 +83,7 @@ let vadBuf = [];  // pending float32 samples awaiting a full 512-sample window
 const COMFORT_BED_VOLUME = 0.05;   // base ambient level
 const COMFORT_BED_DUCK = 0.015;    // level while the user is speaking
 const BED_GLIDE_S = 0.08;          // ramp time for duck/restore (no clicks)
+let comfortBedEnabled = false;     // server-driven flag (COMFORT_BED_ENABLED); off by default
 let bedSource = null;
 let bedGain = null;
 
@@ -111,6 +115,7 @@ async function checkReadiness() {
     const res = await fetch('/readiness', { cache: 'no-store' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
+    comfortBedEnabled = !!(data.config && data.config.comfort_bed_enabled);
     setReadinessRow(voiceReadyEl, 'Voice', data.voice || { ready: false });
     setReadinessRow(calendarReadyEl, 'Calendar', data.calendar || { ready: false });
 
@@ -185,11 +190,87 @@ function stopWave() {
 
 // ─── Audio playback ─────────────────────────────────────────────────────────
 
+// Continuous playback sink. Received PCM16 chunks are pushed (as float32) into
+// a ring buffer; the worklet pulls samples at the device rate, resampling from
+// OUTPUT_SAMPLE_RATE with a fractional read index that carries across chunk
+// boundaries — so there are no per-chunk resampling seams. A short PREBUFFER
+// jitter buffer absorbs network unevenness; on underrun it emits silence and
+// re-buffers (one clean gap) instead of crackling, and reports it once.
+const PLAYBACK_WORKLET_CODE = `
+const SRC_RATE = ${OUTPUT_SAMPLE_RATE};
+const CAP = SRC_RATE * 6;                       // 6 s ring buffer
+const PREBUFFER = Math.round(SRC_RATE * 0.12);  // ~120 ms jitter buffer
+
+class PlaybackProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.ring = new Float32Array(CAP);
+    this.writeIdx = 0;     // absolute write counter
+    this.readIdx = 0;      // absolute integer read counter
+    this.available = 0;    // unread source samples ahead of readIdx
+    this.frac = 0;         // fractional position between readIdx and readIdx+1
+    this.step = SRC_RATE / sampleRate;        // source samples per output sample
+    this.minAvail = Math.ceil(this.step) + 1; // need this many to interpolate
+    this.primed = false;
+    this.port.onmessage = (e) => {
+      const d = e.data;
+      if (d.type === 'pcm') {
+        const s = d.samples;
+        for (let i = 0; i < s.length; i++) {
+          this.ring[this.writeIdx % CAP] = s[i];
+          this.writeIdx++;
+          if (this.available < CAP) this.available++;
+          else this.readIdx++;   // overflow (shouldn't happen): drop oldest
+        }
+      } else if (d.type === 'flush') {
+        this.writeIdx = 0; this.readIdx = 0; this.available = 0;
+        this.frac = 0; this.primed = false;
+      }
+    };
+  }
+  process(_inputs, outputs) {
+    const out = outputs[0] && outputs[0][0];
+    if (!out) return true;
+    if (!this.primed) {
+      if (this.available >= PREBUFFER) this.primed = true;
+      else { out.fill(0); return true; }
+    }
+    for (let i = 0; i < out.length; i++) {
+      if (this.available < this.minAvail) {     // underrun
+        for (; i < out.length; i++) out[i] = 0;
+        this.primed = false;                    // re-buffer before resuming
+        this.port.postMessage({ type: 'underrun' });
+        break;
+      }
+      const a = this.ring[this.readIdx % CAP];
+      const b = this.ring[(this.readIdx + 1) % CAP];
+      out[i] = a + (b - a) * this.frac;
+      this.frac += this.step;
+      while (this.frac >= 1) { this.frac -= 1; this.readIdx++; this.available--; }
+    }
+    return true;
+  }
+}
+registerProcessor('playback-processor', PlaybackProcessor);
+`;
+
 async function ensurePlayCtx() {
   if (!playCtx) {
     playCtx = new AudioContext();
   }
   if (playCtx.state === 'suspended') await playCtx.resume();
+  if (!playWorkletReady) {
+    const blob = new Blob([PLAYBACK_WORKLET_CODE], { type: 'application/javascript' });
+    const url = URL.createObjectURL(blob);
+    await playCtx.audioWorklet.addModule(url);
+    URL.revokeObjectURL(url);
+    playNode = new AudioWorkletNode(playCtx, 'playback-processor');
+    playNode.port.onmessage = (e) => {
+      if (e.data && e.data.type === 'underrun') traceClient('playback_underrun', {});
+    };
+    playNode.connect(playCtx.destination);
+    playWorkletReady = true;
+  }
   return playCtx;
 }
 
@@ -214,7 +295,7 @@ function fillPinkNoise(data) {
 }
 
 function startComfortBed() {
-  if (!playCtx || bedSource) return;
+  if (!comfortBedEnabled || !playCtx || bedSource) return;
   const sr = playCtx.sampleRate;
   const buf = playCtx.createBuffer(1, sr * 4, sr);  // 4 s loop
   fillPinkNoise(buf.getChannelData(0));
@@ -250,68 +331,26 @@ function setUserSpeaking(active) {
   traceClient('user_speech_state', { active });
 }
 
+// Convert a PCM16 LE mono chunk at OUTPUT_SAMPLE_RATE to float32 and hand it to
+// the playback worklet's ring buffer. The worklet does the timing/resampling.
 async function enqueueAudio(uint8) {
   assistantAudioActive = true;
   if (!assistantAudioStartedAt) assistantAudioStartedAt = performance.now();
-  audioQueue.push(uint8);
-  await scheduleAudioQueue();
-}
-
-async function scheduleAudioQueue() {
-  if (schedulingAudio) return;
-  schedulingAudio = true;
+  isPlaying = true;
   try {
-    const ctx = await ensurePlayCtx();
-    if (nextPlayTime < ctx.currentTime) {
-      if (nextPlayTime > 0 && ctx.currentTime - nextPlayTime > 0.04) {
-        traceClient('playback_underrun', { gapMs: Math.round((ctx.currentTime - nextPlayTime) * 1000) });
-      }
-      nextPlayTime = ctx.currentTime + 0.02;
-    }
-
-    while (audioQueue.length) {
-      const chunk = audioQueue.shift();
-      // chunk is Uint8Array of raw PCM16 LE mono at OUTPUT_SAMPLE_RATE
-      const i16 = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.byteLength >>> 1);
-      const f32 = new Float32Array(i16.length);
-      for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
-
-      const buf = ctx.createBuffer(1, f32.length, OUTPUT_SAMPLE_RATE);
-      buf.copyToChannel(f32, 0);
-
-      const src = ctx.createBufferSource();
-      src.buffer = buf;
-      src.connect(ctx.destination);
-      activeSources.add(src);
-
-      const start = Math.max(ctx.currentTime + 0.005, nextPlayTime);
-      nextPlayTime = start + buf.duration;
-      isPlaying = true;
-      src.start(start);
-      src.onended = () => {
-        activeSources.delete(src);
-        if (!activeSources.size && !audioQueue.length) {
-          isPlaying = false;
-          nextPlayTime = 0;
-        }
-      };
-    }
-  } catch(e) {
+    await ensurePlayCtx();
+    const i16 = new Int16Array(uint8.buffer, uint8.byteOffset, uint8.byteLength >>> 1);
+    const f32 = new Float32Array(i16.length);
+    for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+    if (playNode) playNode.port.postMessage({ type: 'pcm', samples: f32 }, [f32.buffer]);
+  } catch (e) {
     dbg('Playback err: ' + e.message);
-    isPlaying = false;
-  } finally {
-    schedulingAudio = false;
   }
 }
 
 function clearAudio() {
-  audioQueue = [];
-  for (const src of activeSources) {
-    try { src.stop(); } catch {}
-  }
-  activeSources.clear();
+  if (playNode) playNode.port.postMessage({ type: 'flush' });
   isPlaying = false;
-  nextPlayTime = 0;
   assistantAudioActive = false;
   assistantAudioStartedAt = 0;
   speechFramesWhileAssistant = 0;
